@@ -49,6 +49,7 @@ export interface SiteResult {
   webviewAvailable: boolean;
   webviewPartitionMatch: "MATCH" | "MISMATCH" | "UNKNOWN";
   webviewPartition: string | null;
+  loadedUrl: string | null;
   pageLoaded: boolean;
   extensionInjected: boolean;
   localStorageShared: boolean;
@@ -116,6 +117,18 @@ function errorMessage(err: unknown): string {
   } catch {
     return String(e);
   }
+}
+
+/** 去掉协议头与末尾斜杠，用于比较请求 URL 与 webview 实际加载 URL。 */
+function normalizeUrl(u: string): string {
+  return u.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+}
+
+function urlMatches(requested: string, loaded: string): boolean {
+  const a = normalizeUrl(requested);
+  const b = normalizeUrl(loaded);
+  if (!a || !b) return false;
+  return b === a || b.startsWith(a + "/");
 }
 
 /**
@@ -332,11 +345,12 @@ export class PocTester {
         "app=" + (this.bridge.partition ?? "null"),
         "webview=" + (wvPart ?? "unknown")
       );
-      base.pageLoaded = await this.waitForPageLoad(opened.webview, timeoutMs);
-      if (!base.pageLoaded) {
-        base.error = "页面加载超时";
+      const page = await this.waitForTargetPageLoad(opened.leaf, opened.webview, url, timeoutMs);
+      if (!page.ok) {
+        base.error = "页面未加载到目标 URL: " + (page.loadedUrl ?? "null");
         return base;
       }
+      base.pageLoaded = true;
       await sleep(800);
       const probe = await this.probePage(opened.webview);
       base.markerValue = probe.marker === "true" ? "true" : probe.marker;
@@ -364,6 +378,7 @@ export class PocTester {
       webviewAvailable: false,
       webviewPartitionMatch: "UNKNOWN",
       webviewPartition: null,
+      loadedUrl: null,
       pageLoaded: false,
       extensionInjected: false,
       localStorageShared: false,
@@ -401,9 +416,18 @@ export class PocTester {
       );
     }
 
-    const loaded = await this.waitForPageLoad(opened.webview, MAX_PAGE_WAIT_MS);
-    if (!loaded) return fail("PAGE_LOAD", "页面加载超时（30s）");
+    const page = await this.waitForTargetPageLoad(opened.leaf, opened.webview, url, MAX_PAGE_WAIT_MS);
+    if (!page.ok) {
+      return fail(
+        "PAGE_LOAD",
+        "页面未加载到目标 URL（30s），loadedUrl=" + (page.loadedUrl ?? "null")
+      );
+    }
     site.pageLoaded = true;
+    site.loadedUrl = page.loadedUrl;
+
+    // 给 content script（document_start 注入）留出执行时间
+    await sleep(800);
 
     const probe = await this.probePage(opened.webview);
     site.finalStage = "CONTENT_SCRIPT";
@@ -519,19 +543,59 @@ export class PocTester {
     return null;
   }
 
-  private async waitForPageLoad(webview: any, timeoutMs: number): Promise<boolean> {
+  /** 读取 <webview> 当前 URL（运行时证据：确认页面真的加载到目标地址）。 */
+  private readWebviewUrl(leaf: WorkspaceLeaf, webview: any): string | null {
+    try {
+      if (typeof webview.getURL === "function") {
+        const v = webview.getURL();
+        if (v) return String(v);
+      }
+    } catch {
+      // ignore
+    }
+    try {
+      const view = leaf.view as any;
+      const el = view?.containerEl?.querySelector?.("webview");
+      if (el && typeof el.getURL === "function") {
+        const v = el.getURL();
+        if (v) return String(v);
+      }
+      if (el && typeof el.getAttribute === "function") {
+        const v = el.getAttribute("src");
+        if (v) return String(v);
+      }
+    } catch {
+      // ignore
+    }
+    return null;
+  }
+
+  /**
+   * 等待 webview 加载到目标 URL 且 isLoading 结束。
+   * isLoading 在 about:blank 初态就可能为 false，必须同时比对 getURL，
+   * 避免探针执行在空白页上。
+   */
+  private async waitForTargetPageLoad(
+    leaf: WorkspaceLeaf,
+    webview: any,
+    requestedUrl: string,
+    timeoutMs: number
+  ): Promise<{ ok: boolean; loadedUrl: string | null }> {
     const t0 = Date.now();
     while (Date.now() - t0 < timeoutMs) {
-      try {
-        if (typeof webview.isLoading !== "function" || !webview.isLoading()) {
-          return true;
+      const loadedUrl = this.readWebviewUrl(leaf, webview);
+      if (loadedUrl && urlMatches(requestedUrl, loadedUrl)) {
+        try {
+          if (typeof webview.isLoading !== "function" || !webview.isLoading()) {
+            return { ok: true, loadedUrl };
+          }
+        } catch {
+          return { ok: true, loadedUrl };
         }
-      } catch {
-        return true; // isLoading 不可用时不阻塞
       }
-      await sleep(500);
+      await sleep(300);
     }
-    return false;
+    return { ok: false, loadedUrl: this.readWebviewUrl(leaf, webview) };
   }
 
   /** 读取 <webview> 的 partition（运行时证据，与 getWebviewPartition 比对）。 */
