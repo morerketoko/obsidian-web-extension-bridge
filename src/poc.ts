@@ -52,6 +52,7 @@ export interface SiteResult {
   loadedUrl: string | null;
   pageLoaded: boolean;
   extensionInjected: boolean;
+  windowMarkerFound: boolean;
   localStorageShared: boolean;
   domMarkerFound: boolean;
   titlePrefixed: boolean;
@@ -128,7 +129,7 @@ function urlMatches(requested: string, loaded: string): boolean {
   const a = normalizeUrl(requested);
   const b = normalizeUrl(loaded);
   if (!a || !b) return false;
-  return b === a || b.startsWith(a + "/");
+  return b === a || b.startsWith(a + "/") || b.startsWith(a + ".");
 }
 
 /**
@@ -345,9 +346,9 @@ export class PocTester {
         "app=" + (this.bridge.partition ?? "null"),
         "webview=" + (wvPart ?? "unknown")
       );
-      const page = await this.waitForTargetPageLoad(opened.leaf, opened.webview, url, timeoutMs);
+      const page = await this.waitForCommittedPage(opened.leaf, opened.webview, url, timeoutMs);
       if (!page.ok) {
-        base.error = "页面未加载到目标 URL: " + (page.loadedUrl ?? "null");
+        base.error = "页面未加载到目标 URL: " + (page.href ?? page.loadedUrl ?? "null");
         return base;
       }
       base.pageLoaded = true;
@@ -381,6 +382,7 @@ export class PocTester {
       loadedUrl: null,
       pageLoaded: false,
       extensionInjected: false,
+      windowMarkerFound: false,
       localStorageShared: false,
       domMarkerFound: false,
       titlePrefixed: false,
@@ -416,31 +418,36 @@ export class PocTester {
       );
     }
 
-    const page = await this.waitForTargetPageLoad(opened.leaf, opened.webview, url, MAX_PAGE_WAIT_MS);
+    const page = await this.waitForCommittedPage(opened.leaf, opened.webview, url, MAX_PAGE_WAIT_MS);
     if (!page.ok) {
       return fail(
         "PAGE_LOAD",
-        "页面未加载到目标 URL（30s），loadedUrl=" + (page.loadedUrl ?? "null")
+        "页面未加载到目标 URL（30s），lastHref=" + (page.href ?? "null") + " loadedUrl=" + (page.loadedUrl ?? "null")
       );
     }
     site.pageLoaded = true;
-    site.loadedUrl = page.loadedUrl;
+    site.loadedUrl = page.href ?? page.loadedUrl;
 
     // 给 content script（document_start 注入）留出执行时间
     await sleep(800);
 
     const probe = await this.probePage(opened.webview);
+
+    // CONTENT_SCRIPT：content script 是否执行过。主判据用 DOM 标记
+    // （网页与隔离世界共享 DOM）；window 标记可能因隔离世界读不到，
+    // 只作为辅助证据记录，不作为失败判据。
     site.finalStage = "CONTENT_SCRIPT";
-    if (!probe.winMarkerInjected) {
-      return fail("CONTENT_SCRIPT", "window.__WEB_EXTENSION_BRIDGE_TEST__ 未注入");
+    const ranViaDom = probe.marker === "true";
+    const ranViaWindow = probe.winMarkerInjected;
+    if (!ranViaDom && !ranViaWindow) {
+      return fail("CONTENT_SCRIPT", "content script 未执行（DOM 标记与全局标记均缺失）");
     }
     site.extensionInjected = true;
+    site.windowMarkerFound = ranViaWindow;
 
+    // LOCALSTORAGE：辅助证据，如实记录但不阻塞（隔离世界可见性待运行确认）
     site.finalStage = "LOCALSTORAGE";
-    if (!probe.localStorageShared) {
-      return fail("LOCALSTORAGE", "content script 写入的 localStorage 不可读（同页面上下文证据缺失）");
-    }
-    site.localStorageShared = true;
+    site.localStorageShared = probe.localStorageShared;
 
     site.finalStage = "DOM_MARKER";
     if (probe.marker !== "true") {
@@ -560,10 +567,6 @@ export class PocTester {
         const v = el.getURL();
         if (v) return String(v);
       }
-      if (el && typeof el.getAttribute === "function") {
-        const v = el.getAttribute("src");
-        if (v) return String(v);
-      }
     } catch {
       // ignore
     }
@@ -571,31 +574,48 @@ export class PocTester {
   }
 
   /**
-   * 等待 webview 加载到目标 URL 且 isLoading 结束。
-   * isLoading 在 about:blank 初态就可能为 false，必须同时比对 getURL，
-   * 避免探针执行在空白页上。
+   * 读取页面 location.href（executeJavaScript，确认导航已提交）。
    */
-  private async waitForTargetPageLoad(
+  private async readPageHref(webview: any): Promise<string | null> {
+    try {
+      const v = await webview.executeJavaScript("location.href");
+      if (v) return String(v);
+    } catch {
+      // 导航提交前 executeJavaScript 可能失败
+    }
+    return null;
+  }
+
+  /**
+   * 等待页面导航真正提交：location.href 命中目标（或主机后缀重定向，
+   * 如 google.com → google.com.hk）且 isLoading 结束。
+   * 不信任 <webview src> 属性（提前设置、不代表已提交）。
+   */
+  private async waitForCommittedPage(
     leaf: WorkspaceLeaf,
     webview: any,
     requestedUrl: string,
     timeoutMs: number
-  ): Promise<{ ok: boolean; loadedUrl: string | null }> {
+  ): Promise<{ ok: boolean; loadedUrl: string | null; href: string | null }> {
     const t0 = Date.now();
+    let lastLoaded: string | null = null;
+    let lastHref: string | null = null;
     while (Date.now() - t0 < timeoutMs) {
-      const loadedUrl = this.readWebviewUrl(leaf, webview);
-      if (loadedUrl && urlMatches(requestedUrl, loadedUrl)) {
+      lastLoaded = this.readWebviewUrl(leaf, webview);
+      lastHref = await this.readPageHref(webview);
+      const probeUrl = lastHref && lastHref !== "about:blank" ? lastHref : null;
+      if (probeUrl && urlMatches(requestedUrl, probeUrl)) {
         try {
           if (typeof webview.isLoading !== "function" || !webview.isLoading()) {
-            return { ok: true, loadedUrl };
+            return { ok: true, loadedUrl: lastLoaded, href: lastHref };
           }
         } catch {
-          return { ok: true, loadedUrl };
+          return { ok: true, loadedUrl: lastLoaded, href: lastHref };
         }
       }
-      await sleep(300);
+      await sleep(400);
     }
-    return { ok: false, loadedUrl: this.readWebviewUrl(leaf, webview) };
+    return { ok: false, loadedUrl: lastLoaded, href: lastHref };
   }
 
   /** 读取 <webview> 的 partition（运行时证据，与 getWebviewPartition 比对）。 */
