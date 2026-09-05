@@ -184,9 +184,10 @@ export class PocTester {
       error: string,
       partition: string | null = null,
       persistence: string | null = null,
-      storagePath: string | null = null
+      storagePath: string | null = null,
+      detail?: unknown
     ): ValidationRun => {
-      push(stage, false, error);
+      push(stage, false, error, detail);
       this.log.error("VALIDATION", stage, error);
       return finish(false, stage, error, partition, persistence, storagePath, null, [], []);
     };
@@ -241,7 +242,8 @@ export class PocTester {
           res.error ?? "loadExtension 失败",
           partition,
           persistence,
-          st.storagePath
+          st.storagePath,
+          { warnings: res.warnings ?? [], message: res.error ?? null }
         );
       }
       extId = res.extension.id;

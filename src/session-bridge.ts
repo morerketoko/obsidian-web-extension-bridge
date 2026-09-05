@@ -290,7 +290,7 @@ export class WebViewerSessionBridge {
 
     return {
       ok: false,
-      error: "loadExtension 调用失败（详见 warnings）。",
+      error: warnings[0] ?? "loadExtension 调用失败（无具体错误信息）。",
       warnings,
     };
   }
