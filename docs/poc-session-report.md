@@ -1,8 +1,10 @@
 # POC Session 报告 — Obsidian Web Extension Bridge
 
-> 状态：**代码与侦察完成；已装入 vault，等待 Obsidian 重载后自动验证回填**。
-> 重载 Obsidian（Ctrl+R 或重启）后，插件会自动恢复 test-extension 并跑一次
-> POC（data.json 的 autoRunPocUrl），结果自动写回 data.json，无需开 DevTools。
+> 状态：**代码与侦察完成；已装入 vault，等待 Obsidian 重载后真机验证回填**。
+> 重载 Obsidian（Ctrl+R 或重启）后，插件会自动恢复 test-extension 并可按
+> `autoRunValidation` 跑完整验证（状态机 + 四站点），结果写进 data.json 的
+> `lastValidationRun`，无需开 DevTools 即可回读。回填模板见
+> `docs/runtime-validation.md`（只填真实结果）。
 
 ## 1. 摘要
 
@@ -52,8 +54,14 @@ App.getWebviewPartition()
 
 - Web Viewer / Canvas link view 创建 `<webview>` 时：
   `webview.partition = app.getWebviewPartition()`（即 `persist:vault-<appId>`）。
-- Electron 语义：相同 partition 字符串 → 同一个 Session 实例，因此
-  **Extension Session === Web Viewer Session**。
+- Electron 语义：相同 partition 字符串 → 同一个 Session 实例。
+  **注意：`Extension Session === Web Viewer Session` 是设计推论，不是结论**。
+  它由 partition 推导而来，必须由真机运行时证据成立：
+  **extension-loaded / ready / unloaded 事件出现在该 Session**、
+  `getAllExtensions` 返回扩展的 `location`、`<webview>.partition` 与
+  `app.getWebviewPartition()` 一致（MATCH）、content script 确实注入
+  Web Viewer 页面。POC 真机验证回填前，不得把该等式当作已成立的事实。
+  证据模板见 `docs/runtime-validation.md`。
 
 ### 3.4 Session 持久性
 
@@ -120,6 +128,10 @@ App.getWebviewPartition()
 
 以下字段在插件装入 vault 并启用后，由
 `[WebExtensionBridge] LOAD_RESULT`/POC 日志回填：
+
+> 完整的真机验证模板（环境 / Session / Extension / POC / 生命周期 / 重启恢复 /
+> 结论）见 `docs/runtime-validation.md`。本文件只汇总；等真机结果出来后，
+> 两处文档一起回填，不写推测。
 
 ```text
 Obsidian version:        (待回填)

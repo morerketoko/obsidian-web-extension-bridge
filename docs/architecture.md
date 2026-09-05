@@ -17,6 +17,19 @@
 - `loadExtension` 只能在主进程调用；通过 Obsidian 内置 `@electron/remote`
   把调用序列化到主进程（不伪造 renderer 实现、不依赖旧的 remote 方案）。
 
+> **关于“Extension Session === Web Viewer Session”**：这是由
+> “相同 partition 字符串 → 同一 Electron Session”推导出的**设计推论**，
+> 不是已证明的运行时事实。POC 阶段必须把它变成运行时证据：
+> 1. `extension-loaded / extension-ready / extension-unloaded` 事件确实
+>    出现在我们从 `getWebviewPartition()` 取得的 Session 上；
+> 2. `getAllExtensions()` 返回扩展的 id/name/version/**location**；
+> 3. Web Viewer 的 `<webview>.partition` 与 `app.getWebviewPartition()`
+>    一致（MATCH），不一致即 POC FAIL；
+> 4. content script 确实注入 Web Viewer 页面（DOM marker / 标题前缀 /
+>    localStorage 同一页面上下文证据）。
+> 在真机验证回填（`docs/runtime-validation.md`）之前，不得在文档/UI 中
+> 把该等式当作已成立的事实。
+
 ## 2. 分层架构
 
 ```text

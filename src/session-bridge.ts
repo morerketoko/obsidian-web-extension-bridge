@@ -6,6 +6,15 @@ import { BridgeLogger } from "./logger";
 // 必须先 feature detect（见 detect()）。
 const PERSIST_PREFIX = "persist:";
 
+// Electron Session.extensions 生命周期事件（Electron 43 文档确认存在）。
+// 注意：@electron/remote 代理可能无法可靠订阅，失败时会如实记录。
+const EXTENSION_EVENTS = [
+  "extension-loaded",
+  "extension-ready",
+  "extension-unloaded",
+] as const;
+export type ExtensionEventType = (typeof EXTENSION_EVENTS)[number] | string;
+
 export interface BridgeStatus {
   ok: boolean;
   partition: string | null;
@@ -23,6 +32,25 @@ export interface LoadedExtension {
   version: string;
   path: string;
   manifest: unknown;
+}
+
+/** 更完整的已加载扩展记录（诊断 / 运行时证据用）。 */
+export interface FullExtensionInfo extends LoadedExtension {
+  /** Electron 提供的扩展位置（unpacked 目录路径等），拿不到时回退 path 或空串。 */
+  location: string;
+  /** 记录查询到该记录时所在的 partition（同一 Partition 推导同一 Session 的运行时证据）。 */
+  partition: string | null;
+}
+
+export interface ExtensionEventRecord {
+  type: ExtensionEventType;
+  id: string;
+  name: string;
+  version: string;
+  partition: string | null;
+  timestamp: string;
+  /** remote 代理传不了原始 message 时为空串；绝不伪造。 */
+  raw: string;
 }
 
 export interface LoadResult {
@@ -55,6 +83,12 @@ function errorMessage(err: unknown): string {
  *
  * loadExtension 只能在 Electron Main Process 调用；此处通过 Obsidian 内置的
  * @electron/remote 把调用序列化到主进程执行，而不是伪造 renderer 端的实现。
+ *
+ * 设计注意（不是结论）：“Extension Session === Web Viewer Session” 由
+ * “相同 partition 字符串 => 同一 Session 实例” 推导而来。该推论必须靠
+ * 运行时证据（extension-loaded 事件发生在该 Session、getAllExtensions
+ * 返回的 location、webview.partition 与 getWebviewPartition 一致、
+ * content script 确实注入 Web Viewer 页面）才能升级为结论。
  */
 export class WebViewerSessionBridge {
   private electron: any = null;
@@ -62,6 +96,12 @@ export class WebViewerSessionBridge {
   private session: any = null;
   private partitionName: string | null = null;
   private status: BridgeStatus | null = null;
+
+  /** 生命周期事件记录（最多保留 200 条），供 POC 审计与运行时证据。 */
+  private eventRecords: ExtensionEventRecord[] = [];
+  /** 已注册的 [target, type, handler] 三元组，便于反订阅。 */
+  private eventHandlers: Array<{ target: any; type: string; handler: (...a: any[]) => void }> = [];
+  private eventSubscriptionError: string | null = null;
 
   constructor(private app: App, private log: BridgeLogger) {}
 
@@ -71,6 +111,22 @@ export class WebViewerSessionBridge {
 
   get statusSnapshot(): BridgeStatus | null {
     return this.status;
+  }
+
+  get extensionEventRecords(): ExtensionEventRecord[] {
+    return this.eventRecords.slice();
+  }
+
+  get extensionEventSubscriptionError(): string | null {
+    return this.eventSubscriptionError;
+  }
+
+  get extensionEventCounts(): Record<string, number> {
+    const counts: Record<string, number> = {};
+    for (const r of this.eventRecords) {
+      counts[r.type] = (counts[r.type] ?? 0) + 1;
+    }
+    return counts;
   }
 
   /** 发现 Web Viewer Session 并做能力检测（只读，不做任何 patch）。 */
@@ -119,8 +175,8 @@ export class WebViewerSessionBridge {
     }
 
     // 3) 取得与 Web Viewer 同一个 partition 的 Session。
-    //    Electron 保证同 partition 返回同一 Session 实例，因此
-    //    Extension Session === Web Viewer Session。
+    //    Electron 保证同 partition 返回同一 Session 实例；但“扩展确实装进
+    //    该 Session”仍需运行时证据确认。
     try {
       this.session = this.remote.session.fromPartition(partition);
     } catch (e) {
@@ -264,8 +320,73 @@ export class WebViewerSessionBridge {
     return false;
   }
 
-  /** 查询已加载扩展（诊断用）。 */
-  async getLoadedExtensions(): Promise<Array<{ id: string; name: string }>> {
+  /**
+   * 订阅 Session 扩展生命周期事件（尽力而为）。
+   * @electron/remote 的 EventEmitter 代理并不保证可用：失败时如实记录
+   * “remote proxy cannot reliably subscribe to Extensions events”，绝不伪造。
+   */
+  subscribeToExtensionEvents(): { ok: boolean; error: string | null } {
+    this.unsubscribeFromExtensionEvents();
+    const target = this.session?.extensions ?? this.session;
+    if (!target || typeof target.on !== "function") {
+      const msg =
+        "session.extensions 无 .on 方法（remote 代理不可靠，无法订阅 Extensions events）";
+      this.eventSubscriptionError = msg;
+      this.log.warn("EXT_EVENTS", msg);
+      return { ok: false, error: msg };
+    }
+    try {
+      for (const type of EXTENSION_EVENTS) {
+        const handler = (ext: any) => {
+          this.recordExtensionEvent(type, ext);
+        };
+        (target as any).on(type, handler);
+        this.eventHandlers.push({ target, type, handler });
+      }
+      this.log.info("EXT_EVENTS", "生命周期事件订阅成功:", EXTENSION_EVENTS.join(","));
+      return { ok: true, error: null };
+    } catch (e) {
+      this.unsubscribeFromExtensionEvents();
+      const msg =
+        "remote proxy cannot reliably subscribe to Extensions events: " + errorMessage(e);
+      this.eventSubscriptionError = msg;
+      this.log.warn("EXT_EVENTS", msg);
+      return { ok: false, error: msg };
+    }
+  }
+
+  unsubscribeFromExtensionEvents(): void {
+    for (const h of this.eventHandlers) {
+      try {
+        if (h.target && typeof h.target.removeListener === "function") {
+          h.target.removeListener(h.type, h.handler);
+        }
+      } catch {
+        // 忽略反订阅异常
+      }
+    }
+    this.eventHandlers = [];
+  }
+
+  private recordExtensionEvent(type: string, ext: any) {
+    const rec: ExtensionEventRecord = {
+      type,
+      id: ext?.id ?? "",
+      name: ext?.name ?? "",
+      version: ext?.version ?? "",
+      partition: this.partitionName,
+      timestamp: new Date().toISOString(),
+      raw: "",
+    };
+    this.eventRecords.push(rec);
+    if (this.eventRecords.length > 200) {
+      this.eventRecords.shift();
+    }
+    this.log.info("EXT_EVENT", JSON.stringify(rec));
+  }
+
+  /** 查询已加载扩展完整记录（含 location / partition，运行时证据）。 */
+  async getLoadedExtensions(): Promise<FullExtensionInfo[]> {
     if (!this.status?.ok || !this.session) return [];
     try {
       const extObj = this.session.extensions;
@@ -276,7 +397,20 @@ export class WebViewerSessionBridge {
             ? await this.session.getAllExtensions()
             : [];
       const arr = (Array.isArray(list) ? list : []) as any[];
-      return arr.map((e) => ({ id: e?.id ?? "", name: e?.name ?? "" }));
+      return arr.map((e) => ({
+        id: e?.id ?? "",
+        name: e?.name ?? "",
+        version: e?.version ?? "",
+        path: e?.path ?? "",
+        location:
+          typeof e?.location === "string"
+            ? e.location
+            : typeof e?.path === "string"
+              ? e.path
+              : "",
+        manifest: e?.manifest ?? null,
+        partition: this.partitionName,
+      }));
     } catch (e) {
       this.log.warn("查询已加载扩展失败:", errorMessage(e));
       return [];

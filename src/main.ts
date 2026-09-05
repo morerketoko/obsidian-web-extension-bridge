@@ -7,8 +7,8 @@ import {
   WebViewerSessionBridge,
 } from "./session-bridge";
 import { confirmExtensionTrust } from "./trust";
-import { PocTester } from "./poc";
-import type { PocResult } from "./poc";
+import { PocTester, DEFAULT_VALIDATION_SITES } from "./poc";
+import type { PocResult, ValidationRun } from "./poc";
 import { BridgeSettingTab } from "./settings";
 
 interface BridgeSettings {
@@ -19,10 +19,18 @@ interface BridgeSettings {
   allowFileAccess: boolean;
   /** 最近一次成功加载的扩展 id（用于启动恢复）。 */
   lastLoadedId: string | null;
-  /** 启动时自动运行一次 POC（诊断/自动化验证用，留空则关闭）。 */
+  /** 最近一次加载失败的结构化原因（持久化，便于无终端排查）。 */
+  lastLoadError: string | null;
+  /** 启动时自动运行一次单 URL POC（留空则关闭）。 */
   autoRunPocUrl: string | null;
-  /** 最近一次 POC 测试结果（写入 data.json 便于无终端验证）。 */
+  /** 最近一次单 URL POC 结果。 */
   lastPocResult: PocResult | null;
+  /** 启动时自动运行完整验证（状态机 + 四站点）。 */
+  autoRunValidation: boolean;
+  /** 完整验证站点列表（默认四站点）。 */
+  validationSites: string[];
+  /** 最近一次完整验证结果（会话证据 + 状态机步骤 + 逐站点记录）。 */
+  lastValidationRun: ValidationRun | null;
 }
 
 const DEFAULT_SETTINGS: BridgeSettings = {
@@ -30,8 +38,12 @@ const DEFAULT_SETTINGS: BridgeSettings = {
   testExtensionTrusted: false,
   allowFileAccess: false,
   lastLoadedId: null,
+  lastLoadError: null,
   autoRunPocUrl: null,
   lastPocResult: null,
+  autoRunValidation: false,
+  validationSites: [...DEFAULT_VALIDATION_SITES],
+  lastValidationRun: null,
 };
 
 const POC_URL = "https://example.com";
@@ -47,6 +59,10 @@ export default class WebExtensionBridgePlugin extends Plugin {
 
   async onload() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    // 兼容旧 data.json：没有 validationSites 时补默认值
+    if (!Array.isArray(this.settings.validationSites) || this.settings.validationSites.length === 0) {
+      this.settings.validationSites = [...DEFAULT_VALIDATION_SITES];
+    }
     this.log.setDebug(this.settings.debug);
     this.env = detectEnvironment();
     this.testExtPath = path.join((this.manifest as any).dir || "", "test-extension");
@@ -67,23 +83,33 @@ export default class WebExtensionBridgePlugin extends Plugin {
       return;
     }
 
-    // Electron 不跨启动保留扩展；如果用户已确认过，启动时自动恢复
-    if (this.settings.testExtensionTrusted) {
-      const res = await this.loadTestExtension(true);
-      if (res.ok) {
-        this.log.info("启动恢复：test-extension 已重新加载。");
-      } else {
-        this.log.warn("启动恢复失败：", res.error ?? "");
-      }
-    }
+    // 状态驱动启动流程：等 layout 就绪后再恢复扩展与自动验证，
+    // 避免 workspace 未就绪时 getLeaf(true) 抛 "No tab group found."。
+    this.app.workspace.onLayoutReady(() => {
+      const doStartup = async () => {
+        // Electron 不跨启动保留扩展；用户已确认过时启动自动恢复
+        if (this.settings.testExtensionTrusted) {
+          const res = await this.loadTestExtension(true);
+          if (res.ok) {
+            this.log.info("启动恢复：test-extension 已重新加载。");
+          } else {
+            this.log.warn("启动恢复失败：", res.error ?? "");
+          }
+        }
 
-    // 诊断模式：启动后自动打开一个 URL 做 POC 检查（结果写入 lastPocResult）
-    const autoUrl = this.settings.autoRunPocUrl;
-    if (autoUrl) {
-      setTimeout(() => {
-        void this.runPoc(autoUrl);
-      }, 3000);
-    }
+        // 诊断模式 1：启动后自动跑单 URL POC（结果写 lastPocResult）
+        const autoUrl = this.settings.autoRunPocUrl;
+        if (autoUrl) {
+          void this.runPoc(autoUrl);
+        }
+
+        // 诊断模式 2：启动后自动跑完整验证（结果写 lastValidationRun）
+        if (this.settings.autoRunValidation) {
+          void this.runValidation();
+        }
+      };
+      void doStartup();
+    });
 
     this.addSettingTab(new BridgeSettingTab(this.app, this));
     this.addCommand({
@@ -91,6 +117,13 @@ export default class WebExtensionBridgePlugin extends Plugin {
       name: "运行 Web Extension Bridge POC 测试（example.com）",
       callback: () => {
         void this.runPoc(POC_URL);
+      },
+    });
+    this.addCommand({
+      id: "run-validation",
+      name: "运行 Web Extension Bridge 完整验证（4 站点）",
+      callback: () => {
+        void this.runValidation();
       },
     });
   }
@@ -134,9 +167,12 @@ export default class WebExtensionBridgePlugin extends Plugin {
     if (res.ok && res.extension) {
       this.loadedExtensionId = res.extension.id;
       this.settings.lastLoadedId = res.extension.id;
+      this.settings.lastLoadError = null;
       await this.saveData(this.settings);
       new Notice(`Web Extension Bridge：已加载 ${res.extension.name}（${res.extension.id}）`);
     } else {
+      this.settings.lastLoadError = res.error ?? "loadExtension 失败（详见 warnings）";
+      await this.saveData(this.settings);
       new Notice("Web Extension Bridge：扩展加载失败，详见控制台日志。");
     }
 
@@ -158,7 +194,7 @@ export default class WebExtensionBridgePlugin extends Plugin {
     return ok;
   }
 
-  /** 一键 POC：打开 URL → 等待加载 → 检查 content script 是否生效。 */
+  /** 单 URL POC：打开 URL → 等加载 → 检查 content script 是否生效。 */
   async runPoc(url: string): Promise<void> {
     new Notice("Web Extension Bridge：开始 POC 测试，请观察新打开的 Web Viewer 标签页。");
     const result = await this.poc.run(url);
@@ -174,6 +210,46 @@ export default class WebExtensionBridgePlugin extends Plugin {
     ];
     if (result.error) lines.push(`错误: ${result.error}`);
     new Notice(lines.join("\n"), 12000);
+  }
+
+  /** 完整验证：状态机 + 四站点 + 生命周期事件证据，结果持久化到 data.json。 */
+  async runValidation(): Promise<void> {
+    new Notice("Web Extension Bridge：开始完整验证（默认 4 站点），请观察新打开的 Web Viewer 标签页。");
+    const sites =
+      this.settings.validationSites.length > 0
+        ? this.settings.validationSites
+        : DEFAULT_VALIDATION_SITES;
+    const run = await this.poc.runValidation({
+      sites,
+      extensionPath: this.testExtPath,
+      allowFileAccess: this.settings.allowFileAccess,
+      alreadyLoadedId: this.loadedExtensionId,
+    });
+    this.settings.lastValidationRun = run;
+    await this.saveData(this.settings);
+
+    const siteLines = run.sites.map((s) => {
+      const parts = [
+        s.url,
+        `open=${s.opened ? "Y" : "N"}`,
+        `webview=${s.webviewAvailable ? "Y" : "N"}`,
+        `load=${s.pageLoaded ? "Y" : "N"}`,
+        `inject=${s.extensionInjected ? "Y" : "N"}`,
+        `dom=${s.domMarkerFound ? "Y" : "N"}`,
+        `title=${s.titlePrefixed ? "Y" : "N"}`,
+      ];
+      if (s.error) parts.push(`err=${s.error}`);
+      return parts.join(" ");
+    });
+    const lines = [
+      `Web Extension Bridge 完整验证: ${run.ok ? "PASS" : "FAIL@" + run.finalStage}`,
+      `partition=${run.partition ?? "null"} | webview=${run.webviewPartition ?? "UNKNOWN"}`,
+      `事件订阅: ${run.eventSubscription.ok ? "成功" : run.eventSubscription.error ?? "失败"}`,
+      `扩展: ${run.extensionIds.join(",") || "(无)"}`,
+      ...siteLines,
+    ];
+    if (run.error) lines.push(`错误: ${run.error}`);
+    new Notice(lines.join("\n"), 20000);
   }
 
   private readTestExtensionManifest(): any {

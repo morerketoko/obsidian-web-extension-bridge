@@ -14,7 +14,8 @@ export class BridgeSettingTab extends PluginSettingTab {
 
     containerEl.createEl("h2", { text: "Obsidian Web Extension Bridge (POC)" });
     containerEl.createEl("p", {
-      text: "Desktop only。将 unpacked Chrome/Chromium Extension 加载进 Core Web Viewer 的 Electron Session（Ext 会注入到 host permissions 允许的网页）。不修改 Media Extended / Obsidian 本体。",
+      text:
+        "Desktop only。将 unpacked Chrome/Chromium Extension 加载进 Core Web Viewer 的 Electron Session（Ext 会注入到 host permissions 允许的网页）。不修改 Media Extended / Obsidian 本体。",
     });
 
     const st = this.plugin.bridge.statusSnapshot;
@@ -63,6 +64,12 @@ export class BridgeSettingTab extends PluginSettingTab {
           ? `已加载: ${this.plugin.loadedExtensionId}`
           : "未加载"
       );
+    if (this.plugin.settings.lastLoadError) {
+      new Setting(containerEl)
+        .setName("上次加载错误")
+        .setDesc(this.plugin.settings.lastLoadError)
+        .setClass("mod-monospace");
+    }
 
     new Setting(containerEl)
       .addButton((b) =>
@@ -96,6 +103,56 @@ export class BridgeSettingTab extends PluginSettingTab {
           this.display();
         })
       );
+
+    containerEl.createEl("h3", { text: "完整验证 (Runtime Validation)" });
+    new Setting(containerEl)
+      .setName("站点列表")
+      .setDesc("逗号分隔的 URL；完整验证会按站点独立记录（默认四站点）。")
+      .addText((t) => {
+        t.setValue(this.plugin.settings.validationSites.join(", "));
+        t.setPlaceholder("https://example.com, https://www.google.com");
+        t.onChange(async (v) => {
+          this.plugin.settings.validationSites = v
+            .split(",")
+            .map((s) => s.trim())
+            .filter((s) => s.length > 0)
+            .slice(0, 8);
+          await this.plugin.saveData(this.plugin.settings);
+        });
+      });
+    new Setting(containerEl)
+      .setName("启动时自动完整验证")
+      .setDesc("重启后自动执行完整验证并把结果写入 data.json（无需开 DevTools 即可回读）。")
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.autoRunValidation).onChange(async (v) => {
+          this.plugin.settings.autoRunValidation = v;
+          await this.plugin.saveData(this.plugin.settings);
+        })
+      );
+    new Setting(containerEl)
+      .setName("运行完整验证")
+      .setDesc("按状态机执行：会话证据 → 扩展加载/验证 → 逐站点记录（含 webview partition 对比）。")
+      .addButton((b) =>
+        b.setButtonText("运行完整验证").setCta().onClick(async () => {
+          await this.plugin.runValidation();
+          this.display();
+        })
+      );
+    const lastRun = this.plugin.settings.lastValidationRun;
+    if (lastRun) {
+      new Setting(containerEl)
+        .setName("上次验证结果")
+        .setDesc(
+          `${lastRun.ok ? "PASS" : "FAIL@" + lastRun.finalStage} | ` +
+            `partition=${lastRun.partition ?? "null"} | webview=${lastRun.webviewPartition ?? "UNKNOWN"} | ` +
+            `事件订阅=${lastRun.eventSubscription.ok ? "成功" : "失败"} | ` +
+            lastRun.sites.map((s) => `${s.url}:${s.finalStage}`).join(" · ")
+        );
+      new Setting(containerEl)
+        .setName("上次验证错误")
+        .setDesc(lastRun.error ?? "（无）")
+        .setClass("mod-monospace");
+    }
 
     containerEl.createEl("h3", { text: "选项" });
     new Setting(containerEl)

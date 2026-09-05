@@ -28,6 +28,11 @@ Session）。`loadExtension` 是主进程 API，这里通过 remote 代理序列
 5. “运行 POC 测试”打开测试 URL，检查网页标题是否带 `[EXT-TEST]` 前缀、
    `data-obsidian-extension-test="true"`（控制台可见结构化
    `[WebExtensionBridge]` 日志）。
+6. 需要完整验证时：设置页 → “运行完整验证”（默认四站点：example.com /
+   google.com / youtube.com / bilibili.com）。它会按状态机记录
+   Session/extensions/`<webview>.partition` 对比等运行时证据，结果写入
+   `data.json` 的 `lastValidationRun`，真机记录回填见
+   `docs/runtime-validation.md`。
 
 ## 日志
 
@@ -43,6 +48,9 @@ session 持久性、扩展路径、扩展 id、加载结果、warnings、失败�
 - 不修改 Obsidian `app.asar`、不修改官方安装文件、不修改 Media Extended。
 - 所有内部 API 均有 feature detect，不兼容时安全退出并提示
   “Web Extension Bridge is not compatible with this Obsidian/Electron version.”。
+- “Extension Session === Web Viewer Session” 是设计推论（由相同 partition
+  推导），不是已证明事实；在 `docs/runtime-validation.md` 回填真机证据之前
+  不当作结论。
 
 ## 授权
 
