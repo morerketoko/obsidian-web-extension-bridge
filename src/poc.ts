@@ -243,7 +243,11 @@ export class PocTester {
           partition,
           persistence,
           st.storagePath,
-          { warnings: res.warnings ?? [], message: res.error ?? null }
+          {
+            path: opts.extensionPath,
+            warnings: res.warnings ?? [],
+            message: res.error ?? null,
+          }
         );
       }
       extId = res.extension.id;

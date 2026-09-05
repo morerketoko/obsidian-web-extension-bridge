@@ -65,14 +65,15 @@ export default class WebExtensionBridgePlugin extends Plugin {
     }
     this.log.setDebug(this.settings.debug);
     this.env = detectEnvironment();
-    this.testExtPath = path.join((this.manifest as any).dir || "", "test-extension");
+    this.testExtPath = this.resolveTestExtensionPath();
 
     this.log.info(
       "插件加载。",
       "Obsidian", this.env.obsidianVersion,
       "| Electron", this.env.electronVersion,
       "| Chrome", this.env.chromeVersion,
-      "| Platform", this.env.platform
+      "| Platform", this.env.platform,
+      "| testExtPath", this.testExtPath
     );
 
     // 环境与 Session 检测（feature detect；失败不崩溃，只提示不兼容）
@@ -261,6 +262,39 @@ export default class WebExtensionBridgePlugin extends Plugin {
       this.log.warn("读取 test-extension manifest 失败:", String(e));
       return null;
     }
+  }
+
+  /**
+   * 解析 test-extension 的绝对路径。
+   * 注意：manifest.dir 是 Obsidian 运行时字段，常见为 vault 相对路径
+   * （如 ".obsidian/plugins/<id>"），Electron 的 loadExtension 只接受绝对路径，
+   * 因此必须用 vault adapter.getBasePath() 拼出绝对路径。
+   */
+  private resolveTestExtensionPath(): string {
+    let basePath = "";
+    try {
+      const adapter = (this.app.vault as any).adapter;
+      if (adapter && typeof adapter.getBasePath === "function") {
+        basePath = String(adapter.getBasePath() ?? "");
+      }
+    } catch {
+      basePath = "";
+    }
+    const dirRaw = (this.manifest as any).dir ?? "";
+
+    // 1) dir 已是绝对路径 → 直接用
+    if (dirRaw && path.isAbsolute(dirRaw)) {
+      return path.join(dirRaw, "test-extension");
+    }
+    // 2) dir 是 vault 相对路径 → 拼接 basePath
+    if (dirRaw && basePath) {
+      return path.join(basePath, dirRaw, "test-extension");
+    }
+    // 3) 兜底：标准 vault 插件目录
+    if (basePath) {
+      return path.join(basePath, ".obsidian", "plugins", this.manifest.id, "test-extension");
+    }
+    return path.join(dirRaw || this.manifest.id || "", "test-extension");
   }
 
   private logLoadResult(res: LoadResult) {
