@@ -1,0 +1,21 @@
+{
+  "name": "obsidian-web-extension-bridge",
+  "version": "0.1.0",
+  "description": "Desktop only. Loads unpacked Chrome/Chromium extensions into the Obsidian Core Web Viewer Electron session (POC).",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production"
+  },
+  "keywords": ["obsidian", "webviewer", "electron", "chrome-extension"],
+  "author": "obsidian-web-extension-bridge",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "builtin-modules": "^3.3.0",
+    "esbuild": "^0.23.0",
+    "obsidian": "latest",
+    "tslib": "^2.6.2",
+    "typescript": "^5.5.4"
+  }
+}

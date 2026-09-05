@@ -1,0 +1,9 @@
+{
+  "id": "obsidian-web-extension-bridge",
+  "name": "Obsidian Web Extension Bridge",
+  "version": "0.1.0",
+  "minAppVersion": "1.12.0",
+  "description": "Desktop only (POC). Loads unpacked Chrome/Chromium extensions into the Obsidian Core Web Viewer Electron session.",
+  "author": "obsidian-web-extension-bridge",
+  "isDesktopOnly": true
+}
