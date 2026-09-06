@@ -33,14 +33,18 @@
 
 | 项 | 结果 | 证据 |
 | --- | --- | --- |
-| Popup Host 可创建视图 | PENDING | 需真机：命令面板 → 打开 Popup |
-| chrome-extension:// 可加载 | PENDING | 需真机：dom-ready / did-fail-load |
-| popup JS 执行 | PENDING | 需真机：console-message / 探针 |
-| chrome.runtime | PENDING | 需真机：PROBE_RUNTIME |
-| chrome.storage.local | PENDING | 需真机：PROBE_STORAGE |
-| chrome.tabs.query | PENDING | 需真机：PROBE_TABS |
-| popup → content_script message | PENDING | 需真机：PING_CONTENT |
-| GPT-3.5 Translator 功能状态 | PENDING | 需真机：以上全部 + 真实翻译请求 |
+| Popup Host 可创建视图 | PASS | 真机 2026-09-06T07:38Z（命令「实验：打开当前扩展 Popup」） |
+| chrome-extension:// 可加载 | PASS | MouseTooltip popup：domReady=true，loadFailed=false，popupAvailable=true |
+| popup JS 执行 | PENDING* | 探针结果未持久化缺陷已修复，需重测回填 |
+| chrome.runtime | PENDING* | 同上（PROBE_RUNTIME） |
+| chrome.storage.local | PENDING* | 同上（PROBE_STORAGE） |
+| chrome.tabs.query | PENDING* | 同上（PROBE_TABS） |
+| popup → content_script message | PENDING* | 同上（PING_CONTENT） |
+| GPT-3.5 Translator 功能状态 | PENDING* | 需重测 + 真实翻译请求 |
+
+* 注：首轮真机 `probes:{}` 为空是回写缺陷（探针只更新视图内存，未同步 data.json）。
+已修复（PopupHost 增加报告回调，探针/加载事件后即时回写 `lastPopupProbe`），
+重新加载插件后重测即可回填。
 
 说明：真机回填见 `docs/phase2-5-machine-feedback.md`，用户操作步骤见文末。
 
@@ -52,4 +56,3 @@
 4. 关闭 Obsidian 后回读
    `E:\ob仓库\.obsidian\plugins\obsidian-web-extension-bridge\data.json`
    的 `lastPopupProbe` 字段，回填本报告
-

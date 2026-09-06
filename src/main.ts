@@ -10,6 +10,7 @@ import { PocTester, DEFAULT_VALIDATION_SITES } from "./poc";
 import type { PocResult, ValidationRun } from "./poc";
 import { ExtensionManager, ManagedExtension } from "./extension-manager";
 import { PopupHost, PopupProbeReport, registerPopupHostView } from "./popup-host";
+import { analyzeExtension } from "./analyzer";
 import { BridgeSettingTab } from "./settings";
 
 interface BridgeSettings {
@@ -85,6 +86,15 @@ export default class WebExtensionBridgePlugin extends Plugin {
 
     // Phase 2.5：旧 data.json 缺 executionMode/activationStatus 时补默认
     for (const item of this.manager.list) {
+      // 旧数据：report 缺 executionMode → 用静态分析原地补齐（不重新加载扩展）。
+      if (!item.report?.executionMode) {
+        try {
+          const rep = analyzeExtension(item.folder);
+          if (!rep.error) item.report = rep;
+        } catch {
+          // 保持旧数据，不阻塞启动
+        }
+      }
       if (!item.executionMode) {
         item.executionMode = item.report?.executionMode ?? "UNKNOWN";
       }
@@ -97,7 +107,11 @@ export default class WebExtensionBridgePlugin extends Plugin {
     void this.saveData(this.settings);
 
     // Popup Host（Phase 2.5 实验）
-    this.popupHost = new PopupHost(this.app, this.log);
+    // 探针/加载事件后同步回写 lastPopupProbe（否则 data.json 永远只有打开时的快照）。
+    this.popupHost = new PopupHost(this.app, this.log, (rep) => {
+      this.settings.lastPopupProbe = rep;
+      void this.saveData(this.settings);
+    });
     registerPopupHostView(
       (type, creator) => this.registerView(type, creator),
       this.log

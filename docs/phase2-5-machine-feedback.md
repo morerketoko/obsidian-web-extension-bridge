@@ -26,16 +26,17 @@ extensions API: 可用 / loadExtension: 可用
 
 | 扩展 | 评级 | 执行模式 | 启用 | 最近加载错误 |
 | --- | --- | --- | --- | --- |
-| test-extension | A | AUTO_INJECT | 是 | 无 |
-| GPT-3.5 Translator | C | POPUP_ACTION | 是 | 无 |
+| test-extension | A | AUTO_INJECT（旧数据待重新分析，下次启动自动补齐） | 是 | 无 |
+| GPT-3.5 Translator | C | POPUP_ACTION（旧数据待重新分析，下次启动自动补齐） | 是 | 无 |
+| MouseTooltipTranslator | F（contextMenus 未支持） | MIXED | 是 | 无 |
 
 ## 验收矩阵（第 20 节）—— PENDING 项需真机操作回填
 
 ```text
                          Load   Inject   UI Entry   Functional
 test-extension            ✓       ✓        N/A         ✓
-GPT-3.5 Translator         ✓       ✓        Popup       ?
-MouseTooltipTranslator    ?       ?        Auto        ?
+GPT-3.5 Translator         ✓       ✓        Popup       ?（探针待重测）
+MouseTooltipTranslator    ✓       ?        Auto        ?
 ```
 
 ### test-extension
@@ -49,8 +50,8 @@ Injection = PASS（POC markerFound=true，标题 [EXT-TEST] 前缀）
 
 ```text
 Load = PASS（POPUP_ACTION；lastLoadedId=ennnoopnplmodedaafeaogfkjknjijdd，无加载错误）
-Layout/评级 = C（uses runtime/scripting/storage/tabs；storage.sync 警告：不跨设备同步）
-Popup Host = PENDING（需真机：打开 Popup）
+    Layout/评级 = C（uses runtime/scripting/storage/tabs；storage.sync 警告：不跨设备同步）
+    Popup Host = PARTIAL（activationStatus 已标 POPUP_AVAILABLE，但 lastPopupProbe 被 MouseTooltip 覆盖，需单独重测）
 Popup JS = PENDING
 runtime = PENDING
 storage.local = PENDING
@@ -61,14 +62,14 @@ Popup → Content = PENDING
 关键认知：`popup.js` 触发翻译，`content.js` 仅监听 onMessage —— 加载成功 ≠ 页面有行为，
 必须用 Popup 才能启动。
 
-### MouseTooltipTranslator（样本已就绪，待导入验证）
+### MouseTooltipTranslator（真机进展 2026-09-06T07:38Z）
 
 ```text
-分析判定 = MIXED（contentScript.js 主动注入 + background.js + action.default_popup=popup.html）
-证据：contentScript.js 含 document.addEventListener×8 / MutationObserver×7 / mouseover×37
-构建产物 = F:\ext-samples\mousetooltiptranslator\build（webpack production 构建完成）
-Load = PENDING（真机：管理器导入 build 目录）
-content injection = PENDING
+真机：已导入 F:\ext-samples\mousetooltiptranslator\build 并启用
+Load = PASS（lastLoadedId=leinnanhfdlmceihjlalcjofeeamcplo，无加载错误）
+Popup Host = PASS（domReady=true，popupAvailable=true —— 本次打开的正是 MouseTooltip 的 popup）
+探针 = 首轮 probes:{} 为回写缺陷（已修复，需重测）
+content injection = PENDING（需在 Web Viewer 页面观察悬浮翻译）
 hover tooltip = PENDING
 selection translation = PENDING
 ```
@@ -80,16 +81,19 @@ Electron Extension Compatibility: SUPPORTED IN SUBSET
 Execution Model: AUTO_INJECT / POPUP_ACTION / MIXED
 Current Functional Coverage:
   AUTO_INJECT    PASS（test-extension）
-  POPUP_ACTION   PENDING（Popup Host 待真机）
-  MIXED          PENDING（MouseTooltipTranslator 待真机导入）
+  POPUP_ACTION   PARTIAL（Popup Host 加载能力 PASS，探针待重测）
+  MIXED          PARTIAL（Load PASS + Popup Host PASS，注入/悬浮翻译待重测）
 ```
 
 ## 待回填检查表
 
 - [ ] Popup Host 视图创建成功（命令「实验：打开当前扩展 Popup」）
+- [x] Popup Host 视图创建成功（真机 2026-09-06T07:38Z）
+- [ ] 重测 PROBE_RUNTIME / PROBE_STORAGE / PROBE_TABS（修复回写后）
+- [ ] 重测 PING_CONTENT（popup → content）
+更详细的首次真机记录与探针回写缺陷说明见上方章节（首轮 probes:{} 为回写缺陷，已修复）。
 - [ ] PROBE_RUNTIME / PROBE_STORAGE / PROBE_TABS 三项结果
 - [ ] PING_CONTENT 结果（popup → content）
 - [ ] GPT-3.5 popup 内实际触发一次翻译请求
 - [ ] MouseTooltipTranslator：Load / hover tooltip / selection translation
 - [ ] 回填 docs/popup-host-poc.md 的 PENDING 项
-

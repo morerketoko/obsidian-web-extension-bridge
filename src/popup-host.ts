@@ -154,7 +154,12 @@ const PROBE_GET_SELECTED = `new Promise((resolve) => {
 export class PopupHost {
   private view: PopupHostView | null = null;
 
-  constructor(private app: App, private log: BridgeLogger) {}
+  constructor(
+    private app: App,
+    private log: BridgeLogger,
+    /** 报告变化回调（探针/加载事件后推送最新报告，用于持久化）。 */
+    private onReport?: (rep: PopupProbeReport) => void
+  ) {}
 
   get isOpen(): boolean {
     return this.view != null;
@@ -182,6 +187,7 @@ export class PopupHost {
     }
     this.view = view;
     view.setTarget({ extensionId, popupPath, partition });
+    view.onReport = (rep) => this.onReport?.(rep);
     const rep = await view.waitReady(8000);
     this.log.info("Popup Host 报告:", JSON.stringify(rep));
     return rep;
@@ -227,6 +233,8 @@ class PopupHostView extends ItemView {
   private popupPath = "";
   private partition: string | null = null;
   private report: PopupProbeReport;
+  /** 外部报告回调：report 每次变化后推送（用于写回 data.json）。 */
+  onReport: ((rep: PopupProbeReport) => void) | null = null;
   private webview: any = null;
   private resultEl: HTMLElement | null = null;
   private statusEl: HTMLElement | null = null;
@@ -341,19 +349,21 @@ class PopupHostView extends ItemView {
     this.webview = wv;
 
     (wv as any).addEventListener("dom-ready", () => {
-      this.report.domReady = true;
-      this.report.popupAvailable = !this.report.loadFailed;
-      this.readyFired = true;
-      this.updateStatus("DOM ready");
-      this.extLog.info("Popup Host dom-ready:", this.report.url);
+     this.report.domReady = true;
+     this.report.popupAvailable = !this.report.loadFailed;
+     this.readyFired = true;
+     this.updateStatus("DOM ready");
+      this.emitReport();
+     this.extLog.info("Popup Host dom-ready:", this.report.url);
     });
     (wv as any).addEventListener("did-fail-load", (e: any) => {
       this.report.loadFailed = true;
       this.report.loadFailureDetail =
         `code=${e?.errorCode} ${e?.errorDescription ?? ""} url=${e?.validatedURL ?? ""}`;
-      this.report.popupAvailable = false;
-      this.updateStatus("加载失败: " + this.report.loadFailureDetail);
-      this.extLog.error("Popup Host did-fail-load:", this.report.loadFailureDetail);
+     this.report.popupAvailable = false;
+     this.updateStatus("加载失败: " + this.report.loadFailureDetail);
+      this.emitReport();
+     this.extLog.error("Popup Host did-fail-load:", this.report.loadFailureDetail);
     });
     (wv as any).addEventListener("console-message", (e: any) => {
       const msg = `[${e?.level ?? "?"}] ${e?.message ?? ""}`;
@@ -367,9 +377,10 @@ class PopupHostView extends ItemView {
       const url = String(e?.url ?? "");
       if (url && !url.startsWith("chrome-extension://")) {
         e.preventDefault();
-        this.report.error = "已阻止外部导航: " + url;
-        this.updateStatus("已阻止外部导航: " + url);
-        this.extLog.warn("Popup Host 阻止外部导航:", url);
+       this.report.error = "已阻止外部导航: " + url;
+       this.updateStatus("已阻止外部导航: " + url);
+        this.emitReport();
+       this.extLog.warn("Popup Host 阻止外部导航:", url);
       }
     });
 
@@ -378,6 +389,10 @@ class PopupHostView extends ItemView {
 
   private updateStatus(text: string) {
     if (this.statusEl) this.statusEl.setText(text);
+  }
+
+  private emitReport() {
+    this.onReport?.({ ...this.report });
   }
 
   async probe(name: string, code: string) {
@@ -392,16 +407,18 @@ class PopupHostView extends ItemView {
         new Promise((_, rej) => setTimeout(() => rej(new Error("executeJavaScript TIMEOUT")), 8000)),
       ]);
       const text = typeof r === "string" ? r : JSON.stringify(r ?? null);
-      this.report.probes[name] = text;
-      this.report.lastProbeAt = new Date().toISOString();
-      this.appendResult(name + " => " + text);
-      this.extLog.info("Popup Host probe", name, text);
+     this.report.probes[name] = text;
+     this.report.lastProbeAt = new Date().toISOString();
+     this.appendResult(name + " => " + text);
+      this.emitReport();
+     this.extLog.info("Popup Host probe", name, text);
     } catch (e) {
       const text = "探针异常: " + errorMessage(e);
-      this.report.probes[name] = text;
-      this.report.lastProbeAt = new Date().toISOString();
-      this.appendResult(name + " => " + text);
-      this.extLog.error("Popup Host probe 失败", name, errorMessage(e));
+     this.report.probes[name] = text;
+     this.report.lastProbeAt = new Date().toISOString();
+     this.appendResult(name + " => " + text);
+      this.emitReport();
+     this.extLog.error("Popup Host probe 失败", name, errorMessage(e));
     }
   }
 
