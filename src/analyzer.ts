@@ -4,7 +4,7 @@
 // 解析 manifest.json + 扫描源码中 chrome.*/browser.* API 用法，
 // 输出评分与不支持/警告清单。只做静态分析，不做任何加载。
 
-export type CompatibilityGrade = "A" | "C" | "D" | "F";
+export type CompatibilityGrade = "A" | "B" | "C" | "D" | "F";
 
 /**
  * 扩展的主要执行模式（Phase 2.5 Capability Model）。
@@ -50,13 +50,23 @@ export interface CompatibilityReport {
   usesContextMenus: boolean;
   usesAction: boolean;
   usesI18n: boolean;
-  /** A：可直接承载；C：部分支持；D：有警告但可用；F：不支持。 */
+  /** 兼容评级（Phase 2.6）：A/B/C/D/F，语义见评级模型。 */
+  grade: CompatibilityGrade;
+  /** 兼容别名（Phase 2 旧字段，与 grade 同步赋值，旧 data.json 兼容）。 */
   score: CompatibilityGrade;
+  /** 静态判定为不支持的 API 总表（含 hard + non-critical）。 */
+  unsupported: string[];
+  /** 不支持的 API 中，静态判定为非核心/可选能力（不影响核心执行路径）。 */
+  nonCriticalUnsupported: string[];
+  /** 静态推断可能影响核心路径、但无法 100% 确认的 API（需要运行时证据）。 */
+  potentialBlockers: string[];
+  /** 明确阻塞核心执行路径的 API（不得仅凭“已声明”判定，需源码实际调用等证据）。 */
+  hardBlockers: string[];
+  /** 功能风险：LOW / MEDIUM / HIGH / BLOCKED。 */
+  functionalRisk: "LOW" | "MEDIUM" | "HIGH" | "BLOCKED";
   supported: boolean;
   /** 部分支持（C 级）的 API 名。 */
   partial: string[];
-  /** 不支持（F 级）的原因列表。 */
-  unsupported: string[];
   warnings: string[];
   /** manifest 解析或目录读取错误。 */
   error: string | null;
@@ -210,6 +220,47 @@ function determineExecutionMode(
 }
 
 /**
+ * Phase 2.6：收集 popup / background 入口脚本（判断初始化路径是否依赖
+ * 不支持的 API）。只做静态文件解析，不做任何执行。
+ */
+function collectEntryScripts(folder: string, manifest: any, fs: any, path: any): string[] {
+  const out: string[] = [];
+  const pushFile = (rel: string | undefined | null) => {
+    if (typeof rel !== "string" || !rel) return;
+    const abs = path.isAbsolute(rel) ? rel : path.join(folder, rel);
+    try {
+      if (fs.existsSync(abs) && fs.statSync(abs).isFile()) out.push(abs);
+    } catch {
+      // 忽略不可读文件
+    }
+  };
+  // popup：解析 html 里的 <script src>
+  const popupHtml =
+    (manifest?.action?.default_popup as string | undefined) ??
+    (manifest?.browser_action?.default_popup as string | undefined);
+  if (typeof popupHtml === "string" && popupHtml) {
+    const htmlAbs = path.isAbsolute(popupHtml) ? popupHtml : path.join(folder, popupHtml);
+    try {
+      const html = fs.readFileSync(htmlAbs, "utf8");
+      const re = /<script[^>]+src\s*=\s*["']([^"']+)["']/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(html)) !== null) {
+        pushFile(m[1]);
+      }
+    } catch {
+      // 忽略：无法读取 popup html
+    }
+  }
+  // background
+  if (typeof manifest?.background?.service_worker === "string") {
+    pushFile(manifest.background.service_worker);
+  }
+  if (typeof manifest?.background?.scripts === "object" && Array.isArray(manifest.background.scripts)) {
+    for (const sc of manifest.background.scripts) pushFile(sc);
+  }
+  return out;
+}
+/**
  * 分析一个 unpacked 扩展目录。返回完整报告（失败时 error 有值，score 为 F）。
  */
 export function analyzeExtension(folder: string): CompatibilityReport {
@@ -235,9 +286,14 @@ export function analyzeExtension(folder: string): CompatibilityReport {
     usesAction: false,
     usesI18n: false,
     score: "F",
+    grade: "F",
     supported: false,
     partial: [],
     unsupported: [],
+    nonCriticalUnsupported: [],
+    potentialBlockers: [],
+    hardBlockers: [],
+    functionalRisk: "BLOCKED",
     warnings: [],
     error: null,
     executionMode: "UNKNOWN",
@@ -306,7 +362,7 @@ export function analyzeExtension(folder: string): CompatibilityReport {
     report.warnings.push("manifest_version 非常规（" + String(report.manifestVersion) + "），Electron 支持不确定");
   }
   if (apis.has("storage.sync")) {
-    report.warnings.push("storage.sync：Electron 中不会真正跨设备同步，仅本地生效");
+    report.warnings.push("storage.sync：Electron 不跨设备同步（Compatibility Adapter 候选，见 docs/compatibility-adapters.md）");
   }
   if (apis.has("storage.managed")) {
     report.warnings.push("storage.managed：依赖企业策略，Electron 不保证可用");
@@ -318,28 +374,106 @@ export function analyzeExtension(folder: string): CompatibilityReport {
     report.warnings.push("无 host permissions / activeTab：content script 默认无法注入任意网站");
   }
 
-  // unsupported（F 级）
-  if (report.usesIdentity) report.unsupported.push("chrome.identity");
-  if (report.usesSidePanel) report.unsupported.push("chrome.sidePanel");
-  if (report.usesContextMenus) report.unsupported.push("chrome.contextMenus");
+  // ---- Phase 2.6：unsupported 与 hardBlockers 分离 ----
+  // 原则：先收集「不支持 API 总表」（unsupported），再区分：
+  //   hardBlockers          明确阻塞核心执行路径（需源码实际调用等证据，不凭声明）
+  //   potentialBlockers     静态推断可能影响核心路径（需运行时证据）
+  //   nonCriticalUnsupported 非核心/可选能力（不直接降级到 F）
+  // 不要因单一 unsupported 自动 F（指令第二节）。
+
+  const declaredOnly = (api: string) => report.permissions.includes(api) && !apis.has(api);
+
+  // 1) 明确 hard blockers
+  if (report.manifestVersion === 1) {
+    report.hardBlockers.push("manifest_version 1：Electron load 不支持");
+  }
+  if (apis.has("identity")) {
+    report.hardBlockers.push("chrome.identity：源码实际调用，Electron 无 OAuth 登录流程（核心鉴权缺失）");
+  }
+  if (apis.has("sidePanel")) {
+    report.hardBlockers.push("chrome.sidePanel：源码实际调用，Electron 无 side panel 上下文（核心 UI 缺失）");
+  }
+  const hasAnyEntry =
+    report.entryPoints.popup || report.entryPoints.background ||
+    report.entryPoints.contentScripts || report.entryPoints.action ||
+    report.entryPoints.browserAction || report.entryPoints.devtools;
+  if (!hasAnyEntry) {
+    report.hardBlockers.push("无 manifest 可用执行入口（无 content_scripts / popup / background / action）");
+  }
+
+  // 2) unsupported 总表（声明或实际调用任一即记录）
+  if (apis.has("identity") || declaredOnly("identity")) report.unsupported.push("chrome.identity");
+  if (apis.has("sidePanel") || declaredOnly("sidePanel")) report.unsupported.push("chrome.sidePanel");
+  if (apis.has("contextMenus") || declaredOnly("contextMenus")) report.unsupported.push("chrome.contextMenus");
+  if (apis.has("storage.sync")) report.unsupported.push("chrome.storage.sync");
+  if (apis.has("storage.managed")) report.unsupported.push("chrome.storage.managed");
   if (report.manifestVersion === 1) report.unsupported.push("manifest_version 1");
 
-  // 评分
-  if (report.error) {
-    report.score = "F";
-  } else if (report.unsupported.length > 0) {
-    report.score = "F";
-  } else if (report.usesRuntime || report.usesTabs || report.usesWebRequest) {
-    report.score = "C";
-    if (report.usesRuntime) report.partial.push("chrome.runtime");
-    if (report.usesTabs) report.partial.push("chrome.tabs");
-    if (report.usesWebRequest) report.partial.push("chrome.webRequest");
-  } else if (report.warnings.length > 0) {
-    report.score = "D";
-  } else {
-    report.score = "A";
+  // 3) 非核心 unsupported（静态判定为非核心/可选能力）
+  if (apis.has("contextMenus") || declaredOnly("contextMenus")) {
+    report.nonCriticalUnsupported.push("chrome.contextMenus（右键菜单：非页面翻译核心路径）");
   }
-  report.supported = report.score !== "F";
+  if (apis.has("storage.managed")) {
+    report.nonCriticalUnsupported.push("chrome.storage.managed（企业策略存储：可选）");
+  }
+  if (declaredOnly("identity")) {
+    report.nonCriticalUnsupported.push("chrome.identity（仅声明未发现实际调用：若鉴权是核心才阻塞）");
+    report.potentialBlockers.push("chrome.identity 已声明：若登录/鉴权为扩展核心路径，Electron 无 OAuth 流程会阻塞");
+  }
+  if (declaredOnly("sidePanel")) {
+    report.nonCriticalUnsupported.push("chrome.sidePanel（仅声明未发现实际调用）");
+  }
+
+  // 4) storage.sync：若出现在 popup/background 入口脚本 → potentialBlocker（指令第十/十二节）
+  const entryScripts = collectEntryScripts(folder, manifest, fs, path);
+  const syncInEntry = entryScripts.some((f) => {
+    try {
+      const t = fs.readFileSync(f, "utf8");
+      return /storage\.sync\s*\.\s*(get|set|clear|remove|getBytesInUse)/.test(t);
+    } catch {
+      return false;
+    }
+  });
+  if (apis.has("storage.sync")) {
+    report.nonCriticalUnsupported.push("chrome.storage.sync（配置类存储：Electron 不支持，StorageSyncToLocalAdapter 候选）");
+    if (syncInEntry) {
+      report.potentialBlockers.push(
+        "chrome.storage.sync 出现在 popup/background 入口脚本：初始化可能崩溃（真机 GPT-3.5 已证实）"
+      );
+    }
+  }
+
+  // 5) partial（Electron 直接支持子集中的部分可用项）
+  if (report.usesRuntime) report.partial.push("chrome.runtime");
+  if (report.usesTabs) report.partial.push("chrome.tabs");
+
+  // 6) 评级（指令第二节语义：A/B/C/D/F）
+  let grade: CompatibilityGrade;
+  if (report.error || report.hardBlockers.length > 0) {
+    grade = "F";
+  } else if (syncInEntry && !report.entryPoints.contentScripts) {
+    // 唯一有效入口初始化依赖 storage.sync（无 content script 兜底）→ 需适配才能保证功能
+    grade = "D";
+  } else if (report.partial.length > 0 || report.nonCriticalUnsupported.length > 0) {
+    grade = "C";
+  } else if (report.warnings.length > 0) {
+    grade = "B";
+  } else {
+    grade = "A";
+  }
+  report.grade = grade;
+  report.score = grade;
+  report.supported = grade !== "F";
+
+  // 7) 功能风险（与评级一致；不声称“静态可确知第三方核心”）
+  if (grade === "F") report.functionalRisk = "BLOCKED";
+  else if (grade === "D") report.functionalRisk = "HIGH";
+  else if (grade === "C") {
+    report.functionalRisk =
+      syncInEntry || apis.has("identity") || declaredOnly("identity") ? "HIGH" : "MEDIUM";
+  } else {
+    report.functionalRisk = "LOW";
+  }
 
   return report;
 }
@@ -352,11 +486,14 @@ export function reportSummary(r: CompatibilityReport): string {
   const apiText =
     r.chromeApisFound.length > 0 ? r.chromeApisFound.join(",") : "(无 chrome/browser API)";
   const notes: string[] = [];
-  if (r.unsupported.length > 0) notes.push("不支持:" + r.unsupported.join(","));
+  if (r.hardBlockers.length > 0) notes.push("硬阻塞:" + r.hardBlockers.join(","));
+  if (r.potentialBlockers.length > 0) notes.push("潜在风险:" + r.potentialBlockers.join(","));
+  if (r.nonCriticalUnsupported.length > 0) notes.push("非核心不支持:" + r.nonCriticalUnsupported.join(","));
   if (r.partial.length > 0) notes.push("部分:" + r.partial.join(","));
   if (r.warnings.length > 0) notes.push("警告:" + r.warnings.length);
   return [
-    `${r.name || "(no name)"}@${r.version} [${r.score}]`,
+    `${r.name || "(no name)"}@${r.version} [${r.grade}]`,
+    "risk=" + r.functionalRisk,
     "mode=" + r.executionMode,
     "content_scripts=" + r.contentScripts,
     "apis(" + apiText + ")",

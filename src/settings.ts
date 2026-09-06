@@ -1,6 +1,6 @@
 import { App, Notice, PluginSettingTab, Setting } from "obsidian";
 import type WebExtensionBridgePlugin from "./main";
-import { reportSummary } from "./analyzer";
+import type { ManagedExtension } from "./extension-manager";
 
 export class BridgeSettingTab extends PluginSettingTab {
   private pocUrl = "https://example.com";
@@ -8,6 +8,83 @@ export class BridgeSettingTab extends PluginSettingTab {
 
   constructor(app: App, private plugin: WebExtensionBridgePlugin) {
     super(app, plugin);
+  }
+
+  /**
+   * 指令十六：每个扩展的最终状态块。
+   * Compatibility / Execution / Load / Popup / Runtime / Storage / Tabs / Functional / Reason / Unsupported / Hard Blocker。
+   */
+  private formatExtensionStatus(item: ManagedExtension): string {
+    const rep = item.report;
+    const probe = this.plugin.settings.lastPopupProbe;
+    const selfProbe =
+      probe && item.lastLoadedId && probe.extensionId === item.lastLoadedId ? probe : null;
+
+    const probeVal = (name: string): string => {
+      const raw = selfProbe?.probes?.[name];
+      if (!raw) return "—";
+      try {
+        const o = JSON.parse(raw) as {
+          status?: string;
+          ok?: boolean;
+          error?: string;
+          runtimeOk?: boolean;
+        };
+        if (o.runtimeOk !== undefined) return o.runtimeOk ? "PASS" : "FAIL(runtimeOk=false)";
+        if (o.status === "RESPONSE") return "PASS";
+        if (o.ok === false) return "FAIL(" + (o.error ?? "") + ")";
+        if (o.status === "ERROR" || o.status === "THROW" || o.status === "TIMEOUT") {
+          return "FAIL(" + o.status + (o.error ? ":" + o.error : "") + ")";
+        }
+        return "PARTIAL";
+      } catch {
+        return raw.length > 100 ? raw.slice(0, 100) + "…" : raw;
+      }
+    };
+
+    const load = item.lastLoadError
+      ? "FAIL(" + item.lastLoadError + ")"
+      : item.lastLoadedId
+        ? "PASS"
+        : item.enabled
+          ? "未加载"
+          : "DISABLED";
+
+    const lines: string[] = [item.folder];
+    lines.push(`Compatibility: ${rep?.grade ?? "?"}`);
+    lines.push(`Execution: ${item.executionMode ?? rep?.executionMode ?? "UNKNOWN"}`);
+    lines.push(`Load: ${load}`);
+    if (item.activationStatus) lines.push(`Activation: ${item.activationStatus}`);
+    lines.push(
+      `Popup: ${
+        selfProbe?.popupAvailable || item.activationStatus === "POPUP_AVAILABLE"
+          ? "PASS"
+          : "—"
+      }`
+    );
+    lines.push(`Runtime: ${probeVal("runtime")}`);
+    lines.push(`Storage: ${probeVal("storage.local")}`);
+    lines.push(`Tabs: ${probeVal("tabs.query")}`);
+    if (selfProbe?.probes?.["PING_CONTENT"] !== undefined) {
+      lines.push(`PING_CONTENT: ${probeVal("PING_CONTENT")}`);
+    }
+    if (selfProbe?.probes?.["getSelectedText"] !== undefined) {
+      lines.push(`getSelectedText: ${probeVal("getSelectedText")}`);
+    }
+    lines.push(`Functional: ${rep?.functionalRisk ?? "UNKNOWN"}`);
+    if (rep && rep.potentialBlockers.length > 0) {
+      lines.push(`Reason: ${rep.potentialBlockers.join(" | ")}`);
+    } else if (rep && rep.nonCriticalUnsupported.length > 0) {
+      lines.push(`Reason: ${rep.nonCriticalUnsupported.join(" | ")}`);
+    }
+    if (rep && rep.unsupported.length > 0) {
+      lines.push(`Unsupported: ${rep.unsupported.join(", ")}`);
+    }
+    lines.push(
+      `Hard Blocker: ${rep && rep.hardBlockers.length > 0 ? rep.hardBlockers.join(", ") : "none"}`
+    );
+    if (item.lastLoadError) lines.push(`上次错误: ${item.lastLoadError}`);
+    return lines.join("\n");
   }
 
   display() {
@@ -88,15 +165,10 @@ export class BridgeSettingTab extends PluginSettingTab {
       new Setting(containerEl).setName("托管列表").setDesc("（暂无扩展，导入后会自动出现在这里）");
     } else {
       for (const item of items) {
-        const grade = item.report?.score ?? "?";
-        const summary = item.report ? reportSummary(item.report) : "（未分析）";
-        const modeLine =
-          `执行模式: ${item.executionMode ?? "UNKNOWN"} | 激活状态: ${item.activationStatus ?? "UNKNOWN"}`;
+        const grade = item.report?.grade ?? item.report?.score ?? "?";
         new Setting(containerEl)
           .setName(`${item.name}@${item.version} [${grade}]`)
-          .setDesc(
-            [item.folder, modeLine, summary, item.lastLoadError ? "上次错误: " + item.lastLoadError : ""].join("\n")
-          )
+          .setDesc(this.formatExtensionStatus(item))
           .addToggle((t) =>
             t
               .setValue(item.enabled)

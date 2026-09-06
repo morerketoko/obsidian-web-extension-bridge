@@ -86,8 +86,8 @@ export default class WebExtensionBridgePlugin extends Plugin {
 
     // Phase 2.5：旧 data.json 缺 executionMode/activationStatus 时补默认
     for (const item of this.manager.list) {
-      // 旧数据：report 缺 executionMode → 用静态分析原地补齐（不重新加载扩展）。
-      if (!item.report?.executionMode) {
+      // 旧数据：report 缺 executionMode / grade（Phase 2.6 评级模型）→ 静态分析原地补齐。
+      if (!item.report?.executionMode || !item.report?.grade) {
         try {
           const rep = analyzeExtension(item.folder);
           if (!rep.error) item.report = rep;
