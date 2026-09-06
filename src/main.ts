@@ -6,9 +6,9 @@ import {
   LoadResult,
   WebViewerSessionBridge,
 } from "./session-bridge";
-import { confirmExtensionTrust } from "./trust";
 import { PocTester, DEFAULT_VALIDATION_SITES } from "./poc";
 import type { PocResult, ValidationRun } from "./poc";
+import { ExtensionManager, ManagedExtension } from "./extension-manager";
 import { BridgeSettingTab } from "./settings";
 
 interface BridgeSettings {
@@ -31,6 +31,8 @@ interface BridgeSettings {
   validationSites: string[];
   /** 最近一次完整验证结果（会话证据 + 状态机步骤 + 逐站点记录）。 */
   lastValidationRun: ValidationRun | null;
+  /** 托管扩展列表（Extension Manager，Phase 2）。 */
+  managedExtensions: ManagedExtension[];
 }
 
 const DEFAULT_SETTINGS: BridgeSettings = {
@@ -44,6 +46,7 @@ const DEFAULT_SETTINGS: BridgeSettings = {
   autoRunValidation: false,
   validationSites: [...DEFAULT_VALIDATION_SITES],
   lastValidationRun: null,
+  managedExtensions: [],
 };
 
 const POC_URL = "https://example.com";
@@ -56,6 +59,7 @@ export default class WebExtensionBridgePlugin extends Plugin {
   settings: BridgeSettings = { ...DEFAULT_SETTINGS };
   testExtPath = "";
   loadedExtensionId: string | null = null;
+  manager!: ExtensionManager;
 
   async onload() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
@@ -66,6 +70,13 @@ export default class WebExtensionBridgePlugin extends Plugin {
     this.log.setDebug(this.settings.debug);
     this.env = detectEnvironment();
     this.testExtPath = this.resolveTestExtensionPath();
+
+    // Extension Manager：托管记录任何变更都立即回写 data.json
+    this.manager = new ExtensionManager(this.app, this.bridge, this.log, () => {
+      this.settings.managedExtensions = this.manager.list;
+      void this.saveData(this.settings);
+    });
+    this.manager.setList(this.settings.managedExtensions);
 
     this.log.info(
       "插件加载。",
@@ -84,18 +95,31 @@ export default class WebExtensionBridgePlugin extends Plugin {
       return;
     }
 
+    // 迁移旧版 testExtensionTrusted（Phase 1 data.json）→ 托管列表
+    if (this.settings.testExtensionTrusted && this.testExtPath) {
+      if (!this.manager.findByFolder(this.testExtPath)) {
+        const mig = await this.manager.import(this.testExtPath);
+        if (mig.ok) {
+          this.manager.patchItem(this.testExtPath, {
+            trusted: true,
+            enabled: true,
+            allowFileAccess: this.settings.allowFileAccess,
+          });
+          this.log.info("已迁移 testExtensionTrusted → 扩展管理列表:", this.testExtPath);
+        } else {
+          this.log.warn("迁移 test-extension 失败:", mig.error ?? "");
+        }
+      }
+    }
+
     // 状态驱动启动流程：等 layout 就绪后再恢复扩展与自动验证，
     // 避免 workspace 未就绪时 getLeaf(true) 抛 "No tab group found."。
     this.app.workspace.onLayoutReady(() => {
       const doStartup = async () => {
-        // Electron 不跨启动保留扩展；用户已确认过时启动自动恢复
-        if (this.settings.testExtensionTrusted) {
-          const res = await this.loadTestExtension(true);
-          if (res.ok) {
-            this.log.info("启动恢复：test-extension 已重新加载。");
-          } else {
-            this.log.warn("启动恢复失败：", res.error ?? "");
-          }
+        // Electron 不跨启动保留扩展；按托管列表恢复所有已启用且已信任的扩展
+        const startupRes = await this.manager.startup();
+        if (startupRes.loaded > 0 || startupRes.failed > 0) {
+          this.log.info("启动恢复完成:", JSON.stringify(startupRes));
         }
 
         // 诊断模式 1：启动后自动跑单 URL POC（结果写 lastPocResult）
@@ -127,10 +151,24 @@ export default class WebExtensionBridgePlugin extends Plugin {
         void this.runValidation();
       },
     });
+    this.addCommand({
+      id: "reload-all-extensions",
+      name: "重载全部已启用扩展",
+      callback: () => {
+        void (async () => {
+          const r = await this.manager.reloadAll();
+          new Notice(`Web Extension Bridge：重载完成（成功 ${r.loaded}，失败 ${r.failed}）`);
+        })();
+      },
+    });
   }
 
   onunload() {
     // 可逆性：卸载我们加载的扩展，避免污染 Web Viewer Session
+    if (this.manager) {
+      void this.manager.unloadAll();
+      this.log.info("onunload：已请求卸载全部托管扩展。");
+    }
     if (this.loadedExtensionId) {
       void this.bridge.unloadExtension(this.loadedExtensionId);
       this.log.info("onunload：已请求卸载", this.loadedExtensionId);
@@ -144,26 +182,23 @@ export default class WebExtensionBridgePlugin extends Plugin {
       return { ok: false, error: "Session 不可用", warnings: [] };
     }
 
-    if (!skipConfirm && !this.settings.testExtensionTrusted) {
-      const manifest = this.readTestExtensionManifest();
-      const confirmed = await confirmExtensionTrust(this.app, {
-        name: manifest?.name ?? "Obsidian WebView Extension Test",
-        path: this.testExtPath,
-        version: manifest?.version ?? "",
-        hostPermissions: manifest?.host_permissions ?? [],
-        permissions: manifest?.permissions ?? [],
-      });
-      if (!confirmed) {
-        new Notice("Web Extension Bridge：已取消启用 test-extension。");
-        return { ok: false, error: "用户取消", warnings: ["用户未确认信任"] };
+    if (!this.testExtPath) {
+      return { ok: false, error: "test-extension 路径为空", warnings: [] };
+    }
+    if (!this.manager.findByFolder(this.testExtPath)) {
+      const imp = await this.manager.import(this.testExtPath);
+      if (!imp.ok) {
+        new Notice("Web Extension Bridge：导入 test-extension 失败：" + (imp.error ?? ""));
+        return { ok: false, error: imp.error ?? "导入失败", warnings: [] };
       }
-      this.settings.testExtensionTrusted = true;
     }
 
-    const res = await this.bridge.loadExtension(
-      this.testExtPath,
-      this.settings.allowFileAccess
-    );
+    const res = await this.manager.enable(this.testExtPath, { skipConfirm });
+
+    // 兼容旧字段：确认信任后回写旧 testExtensionTrusted
+    if (this.manager.findByFolder(this.testExtPath)?.trusted) {
+      this.settings.testExtensionTrusted = true;
+    }
 
     if (res.ok && res.extension) {
       this.loadedExtensionId = res.extension.id;
@@ -172,6 +207,7 @@ export default class WebExtensionBridgePlugin extends Plugin {
       await this.saveData(this.settings);
       new Notice(`Web Extension Bridge：已加载 ${res.extension.name}（${res.extension.id}）`);
     } else {
+      this.loadedExtensionId = null;
       this.settings.lastLoadError = res.error ?? "loadExtension 失败（详见 warnings）";
       await this.saveData(this.settings);
       new Notice("Web Extension Bridge：扩展加载失败，详见控制台日志。");
@@ -182,8 +218,8 @@ export default class WebExtensionBridgePlugin extends Plugin {
   }
 
   async unloadTestExtension(): Promise<boolean> {
-    if (!this.loadedExtensionId) return false;
-    const ok = await this.bridge.unloadExtension(this.loadedExtensionId);
+    if (!this.testExtPath) return false;
+    const ok = await this.manager.disable(this.testExtPath);
     if (ok) {
       this.loadedExtensionId = null;
       this.settings.lastLoadedId = null;

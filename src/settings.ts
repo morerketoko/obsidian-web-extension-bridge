@@ -1,8 +1,10 @@
-import { App, PluginSettingTab, Setting } from "obsidian";
+import { App, Notice, PluginSettingTab, Setting } from "obsidian";
 import type WebExtensionBridgePlugin from "./main";
+import { reportSummary } from "./analyzer";
 
 export class BridgeSettingTab extends PluginSettingTab {
   private pocUrl = "https://example.com";
+  private importPath = "";
 
   constructor(app: App, private plugin: WebExtensionBridgePlugin) {
     super(app, plugin);
@@ -50,6 +52,75 @@ export class BridgeSettingTab extends PluginSettingTab {
           `extensions 对象: ${st.extensionsApiAvailable ? "可用" : "不可用"}；` +
             `loadExtension: ${st.loadExtensionApiAvailable ? "可用" : "不可用"}`
         );
+    }
+
+    containerEl.createEl("h3", { text: "扩展管理 (Extension Manager)" });
+    new Setting(containerEl)
+      .setName("导入 unpacked 扩展")
+      .setDesc("填入扩展目录的绝对路径（含 manifest.json 的文件夹）。导入只做静态分析，不会立即加载。")
+      .addText((t) => {
+        t.setPlaceholder("F:\\path\\to\\extension");
+        t.setValue(this.importPath);
+        t.onChange((v) => (this.importPath = v.trim()));
+      })
+      .addButton((b) =>
+        b.setButtonText("导入 / 分析").setCta().onClick(async () => {
+          if (!this.importPath) {
+            new Notice("Web Extension Bridge：请先填入扩展目录路径。");
+            return;
+          }
+          const r = await this.plugin.manager.import(this.importPath);
+          if (!r.ok) {
+            new Notice("Web Extension Bridge：导入失败 - " + (r.error ?? "未知错误"), 8000);
+          } else {
+            new Notice(
+              "Web Extension Bridge：导入成功 - " +
+                (r.item ? `${r.item.name}@${r.item.version} [${r.item.report?.score ?? "?"}]` : this.importPath),
+              6000
+            );
+          }
+          this.display();
+        })
+      );
+
+    const items = this.plugin.manager.list;
+    if (items.length === 0) {
+      new Setting(containerEl).setName("托管列表").setDesc("（暂无扩展，导入后会自动出现在这里）");
+    } else {
+      for (const item of items) {
+        const grade = item.report?.score ?? "?";
+        const summary = item.report ? reportSummary(item.report) : "（未分析）";
+        new Setting(containerEl)
+          .setName(`${item.name}@${item.version} [${grade}]`)
+          .setDesc(
+            [item.folder, summary, item.lastLoadError ? "上次错误: " + item.lastLoadError : ""].join("\n")
+          )
+          .addToggle((t) =>
+            t
+              .setValue(item.enabled)
+              .setTooltip("启用后该扩展将注入 Web Viewer 站点")
+              .onChange(async (v) => {
+                if (v) {
+                  await this.plugin.manager.enable(item.folder);
+                } else {
+                  await this.plugin.manager.disable(item.folder);
+                }
+                this.display();
+              })
+          )
+          .addButton((b) =>
+            b.setButtonText("重新加载").setTooltip("重新分析 + 卸载旧实例后重新加载").onClick(async () => {
+              await this.plugin.manager.reload(item.folder);
+              this.display();
+            })
+          )
+          .addButton((b) =>
+            b.setButtonText("移除").onClick(async () => {
+              await this.plugin.manager.remove(item.folder);
+              this.display();
+            })
+          );
+      }
     }
 
     containerEl.createEl("h3", { text: "测试扩展 (test-extension)" });

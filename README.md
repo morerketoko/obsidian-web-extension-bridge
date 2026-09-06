@@ -1,8 +1,9 @@
 # Obsidian Web Extension Bridge
 
-Desktop-only Obsidian 插件（**Phase 1 POC**）：把 unpacked Chrome/Chromium
-Extension 加载进 **Obsidian Core Web Viewer 的 Electron Session**，使
-content script（网页翻译、网页增强、划词工具等）作用于 Web Viewer 页面。
+Desktop-only Obsidian 插件：把 unpacked Chrome/Chromium Extension 加载进
+**Obsidian Core Web Viewer 的 Electron Session**，使 content script（网页翻译、
+网页增强、划词工具等）作用于 Web Viewer 页面。Phase 1 完成 POC 运行时验证，
+Phase 2 加入 Extension Manager（导入 / 静态兼容分析 / 启停 / 重载 / 移除）。
 Media Extended v4 复用同一个 Core Web Viewer，因此扩展同样能作用于
 Media Extended 打开的网页 —— 本插件不修改 Media Extended 源码。
 
@@ -34,6 +35,19 @@ Session）。`loadExtension` 是主进程 API，这里通过 remote 代理序列
    `data.json` 的 `lastValidationRun`，真机记录回填见
    `docs/runtime-validation.md`。
 
+## 用法（Phase 2：扩展管理）
+
+1. 设置页 → “扩展管理” → 填扩展目录绝对路径（含 manifest.json 的文件夹）→ “导入 / 分析”。
+2. 导入只做静态兼容分析，不会立即加载；同一路径重复导入是幂等更新。
+3. 列表每条记录显示 名称/版本/评级（A/C/D/F）与一行摘要：
+   - A：可直接承载（content_scripts + scripting + storage.local）
+   - C：部分支持（使用 chrome.runtime / tabs / webRequest）
+   - D：有警告（storage.sync / MV2 等，不影响加载）
+   - F：不支持（identity / sidePanel / contextMenus 或 manifest 无法解析）
+4. 启用开关：首次必须弹信任确认（TrustModal），之后按“已启用且已信任”自动恢复。
+5. “重新加载” = 重新分析 + 卸载旧实例 + 重载；“移除” = 卸载并从列表删除。
+6. 命令面板提供“重载全部已启用扩展”，一键重载全部托管扩展。
+
 ## 日志
 
 统一前缀 `[WebExtensionBridge]`，级别 INFO/WARN/ERROR/DEBUG（设置页开启 DEBUG）。
@@ -48,6 +62,10 @@ session 持久性、扩展路径、扩展 id、加载结果、warnings、失败�
   `docs/runtime-validation.md`）。
 - 显示 “Electron Extension Compatibility”，**不承诺** 100% Chrome 扩展兼容。
 - 只支持 unpacked 扩展；不支持 CRX / Chrome Web Store / identity / sidePanel。
+- 导入时会做静态兼容分析并评分（A/C/D/F）：identity / sidePanel / contextMenus
+  任一被使用 → F；runtime / tabs / webRequest → C；storage.sync / MV2 等 → D 警告；
+  纯 content_scripts + scripting + storage.local → A。评分只说明“静态结构”，
+  是否真正可用仍以真机加载结果为准。
 - 不修改 Obsidian `app.asar`、不修改官方安装文件、不修改 Media Extended。
 - 所有内部 API 均有 feature detect，不兼容时安全退出并提示
   “Web Extension Bridge is not compatible with this Obsidian/Electron version.”。
