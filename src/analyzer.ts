@@ -6,6 +6,29 @@
 
 export type CompatibilityGrade = "A" | "C" | "D" | "F";
 
+/**
+ * 扩展的主要执行模式（Phase 2.5 Capability Model）。
+ * 只描述“入口形态”，与兼容评级（A/C/D/F）无关。
+ */
+export type ExtensionExecutionMode =
+  | "AUTO_INJECT"
+  | "POPUP_ACTION"
+  | "BACKGROUND_ONLY"
+  | "DEVTOOLS"
+  | "MIXED"
+  | "UNKNOWN";
+
+/** manifest 声明的各类入口。 */
+export interface ExtensionEntryPoints {
+  contentScripts: boolean;
+  popup: boolean;
+  action: boolean;
+  browserAction: boolean;
+  background: boolean;
+  commands: boolean;
+  devtools: boolean;
+}
+
 export interface CompatibilityReport {
   /** manifest_version（null 表示解析失败）。 */
   manifestVersion: number | null;
@@ -37,6 +60,10 @@ export interface CompatibilityReport {
   warnings: string[];
   /** manifest 解析或目录读取错误。 */
   error: string | null;
+  /** 扩展的主要执行模式（入口判定，与兼容评级无关）。 */
+  executionMode: ExtensionExecutionMode;
+  /** manifest 声明的各类入口。 */
+  entryPoints: ExtensionEntryPoints;
 }
 
 const SKIP_DIRS = new Set(["node_modules", ".git", ".svn", ".hg"]);
@@ -110,6 +137,78 @@ function isHostPattern(p: string): boolean {
   );
 }
 
+/** 解析 manifest 中声明的入口点。 */
+function parseEntryPoints(manifest: any): ExtensionEntryPoints {
+  const action = manifest.action ?? null;
+  const browserAction = manifest.browser_action ?? null;
+  const popup =
+    (typeof action?.default_popup === "string" && action.default_popup.length > 0) ||
+    (typeof browserAction?.default_popup === "string" && browserAction.default_popup.length > 0);
+  return {
+    contentScripts: Array.isArray(manifest.content_scripts) && manifest.content_scripts.length > 0,
+    popup,
+    action: !!action,
+    browserAction: !!browserAction,
+    background: !!manifest.background,
+    commands:
+      !!manifest.commands &&
+      typeof manifest.commands === "object" &&
+      Object.keys(manifest.commands).length > 0,
+    devtools: typeof manifest.devtools_page === "string" && manifest.devtools_page.length > 0,
+  };
+}
+
+/** content script 是否为“实际页面入口”（主动修改页面），而非仅被动响应消息。 */
+function isActiveContentScript(file: string, fs: any): boolean {
+  try {
+    const text = fs.readFileSync(file, "utf8");
+    return /document\.|addEventListener\s*\(|MutationObserver\s*\(|createElement|innerHTML|setInterval|on[A-Za-z]+\s*=/.test(
+      text
+    );
+  } catch {
+    return true; // 读不到时保守视为主动
+  }
+}
+
+/**
+ * 判定扩展的执行模式（Phase 2.5）：
+ * content_scripts 是实际页面入口（主动）且有 popup/action/background → MIXED；
+ * 仅主动 content_scripts → AUTO_INJECT；
+ * 仅 popup → POPUP_ACTION（obsidian 无工具栏，需 Popup Host）；
+ * 仅 background → BACKGROUND_ONLY；仅 devtools_page → DEVTOOLS。
+ */
+function determineExecutionMode(
+  folder: string,
+  manifest: any,
+  ep: ExtensionEntryPoints,
+  fs: any,
+  path: any
+): ExtensionExecutionMode {
+  let activeContentScript = false;
+  if (ep.contentScripts) {
+    for (const cs of (manifest.content_scripts as any[]) ?? []) {
+      for (const jf of (Array.isArray(cs?.js) ? cs.js : []) as string[]) {
+        const abs = path.isAbsolute(jf) ? jf : path.join(folder, jf);
+        if (isActiveContentScript(abs, fs)) {
+          activeContentScript = true;
+          break;
+        }
+      }
+      if (activeContentScript) break;
+    }
+  }
+
+  if (ep.devtools && !activeContentScript && !ep.popup && !ep.background) return "DEVTOOLS";
+  if (activeContentScript && (ep.popup || ep.action || ep.browserAction || ep.background)) {
+    return "MIXED";
+  }
+  if (activeContentScript) return "AUTO_INJECT";
+  if (ep.popup) return "POPUP_ACTION";
+  if (ep.background) return "BACKGROUND_ONLY";
+  if (ep.devtools) return "DEVTOOLS";
+  return "UNKNOWN";
+}
+
 /**
  * 分析一个 unpacked 扩展目录。返回完整报告（失败时 error 有值，score 为 F）。
  */
@@ -141,6 +240,16 @@ export function analyzeExtension(folder: string): CompatibilityReport {
     unsupported: [],
     warnings: [],
     error: null,
+    executionMode: "UNKNOWN",
+    entryPoints: {
+      contentScripts: false,
+      popup: false,
+      action: false,
+      browserAction: false,
+      background: false,
+      commands: false,
+      devtools: false,
+    },
   };
 
   let manifestRaw: string;
@@ -168,6 +277,8 @@ export function analyzeExtension(folder: string): CompatibilityReport {
     ? manifest.host_permissions.map(String)
     : declared.filter((p: string) => isHostPattern(p));
   report.contentScripts = Array.isArray(manifest.content_scripts) ? manifest.content_scripts.length : 0;
+  report.entryPoints = parseEntryPoints(manifest);
+  report.executionMode = determineExecutionMode(folder, manifest, report.entryPoints, fs, path);
 
   // 源码扫描
   const files: string[] = [];
@@ -246,6 +357,7 @@ export function reportSummary(r: CompatibilityReport): string {
   if (r.warnings.length > 0) notes.push("警告:" + r.warnings.length);
   return [
     `${r.name || "(no name)"}@${r.version} [${r.score}]`,
+    "mode=" + r.executionMode,
     "content_scripts=" + r.contentScripts,
     "apis(" + apiText + ")",
     notes.join(" "),

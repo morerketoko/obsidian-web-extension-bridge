@@ -90,10 +90,12 @@ export class BridgeSettingTab extends PluginSettingTab {
       for (const item of items) {
         const grade = item.report?.score ?? "?";
         const summary = item.report ? reportSummary(item.report) : "（未分析）";
+        const modeLine =
+          `执行模式: ${item.executionMode ?? "UNKNOWN"} | 激活状态: ${item.activationStatus ?? "UNKNOWN"}`;
         new Setting(containerEl)
           .setName(`${item.name}@${item.version} [${grade}]`)
           .setDesc(
-            [item.folder, summary, item.lastLoadError ? "上次错误: " + item.lastLoadError : ""].join("\n")
+            [item.folder, modeLine, summary, item.lastLoadError ? "上次错误: " + item.lastLoadError : ""].join("\n")
           )
           .addToggle((t) =>
             t
@@ -115,6 +117,15 @@ export class BridgeSettingTab extends PluginSettingTab {
             })
           )
           .addButton((b) =>
+            b
+              .setButtonText("打开 Popup")
+              .setTooltip("实验：在 Popup Host 视图中打开该扩展 popup（需已加载）")
+              .onClick(async () => {
+                await this.plugin.openPopupFor(item.folder);
+                this.display();
+              })
+          )
+          .addButton((b) =>
             b.setButtonText("移除").onClick(async () => {
               await this.plugin.manager.remove(item.folder);
               this.display();
@@ -122,6 +133,15 @@ export class BridgeSettingTab extends PluginSettingTab {
           );
       }
     }
+
+    new Setting(containerEl)
+      .setName("测试当前页面 Extension Injection")
+      .setDesc("轻量诊断（第 15 节）：区分 Bridge 失败与扩展自身功能失败，只聚合已有运行证据，不做代测。")
+      .addButton((b) =>
+        b.setButtonText("运行诊断").setCta().onClick(() => {
+          new Notice(this.plugin.diagnoseInjection().join("\n"), 12000);
+        })
+      );
 
     containerEl.createEl("h3", { text: "测试扩展 (test-extension)" });
     new Setting(containerEl)

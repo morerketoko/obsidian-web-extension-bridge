@@ -9,6 +9,7 @@ import {
 import { PocTester, DEFAULT_VALIDATION_SITES } from "./poc";
 import type { PocResult, ValidationRun } from "./poc";
 import { ExtensionManager, ManagedExtension } from "./extension-manager";
+import { PopupHost, PopupProbeReport, registerPopupHostView } from "./popup-host";
 import { BridgeSettingTab } from "./settings";
 
 interface BridgeSettings {
@@ -33,6 +34,8 @@ interface BridgeSettings {
   lastValidationRun: ValidationRun | null;
   /** 托管扩展列表（Extension Manager，Phase 2）。 */
   managedExtensions: ManagedExtension[];
+  /** 最近一次 Popup Host 探针报告（Phase 2.5）。 */
+  lastPopupProbe: PopupProbeReport | null;
 }
 
 const DEFAULT_SETTINGS: BridgeSettings = {
@@ -47,6 +50,7 @@ const DEFAULT_SETTINGS: BridgeSettings = {
   validationSites: [...DEFAULT_VALIDATION_SITES],
   lastValidationRun: null,
   managedExtensions: [],
+  lastPopupProbe: null,
 };
 
 const POC_URL = "https://example.com";
@@ -60,6 +64,7 @@ export default class WebExtensionBridgePlugin extends Plugin {
   testExtPath = "";
   loadedExtensionId: string | null = null;
   manager!: ExtensionManager;
+  popupHost!: PopupHost;
 
   async onload() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
@@ -77,6 +82,26 @@ export default class WebExtensionBridgePlugin extends Plugin {
       void this.saveData(this.settings);
     });
     this.manager.setList(this.settings.managedExtensions);
+
+    // Phase 2.5：旧 data.json 缺 executionMode/activationStatus 时补默认
+    for (const item of this.manager.list) {
+      if (!item.executionMode) {
+        item.executionMode = item.report?.executionMode ?? "UNKNOWN";
+      }
+      if (!item.activationStatus) {
+        item.activationStatus =
+          item.report?.executionMode === "POPUP_ACTION" ? "LOADED_NO_UI_ENTRY" : "UNKNOWN";
+      }
+    }
+    this.settings.managedExtensions = this.manager.list;
+    void this.saveData(this.settings);
+
+    // Popup Host（Phase 2.5 实验）
+    this.popupHost = new PopupHost(this.app, this.log);
+    registerPopupHostView(
+      (type, creator) => this.registerView(type, creator),
+      this.log
+    );
 
     this.log.info(
       "插件加载。",
@@ -161,10 +186,20 @@ export default class WebExtensionBridgePlugin extends Plugin {
         })();
       },
     });
+    this.addCommand({
+      id: "open-popup-experiment",
+      name: "实验：打开当前扩展 Popup",
+      callback: () => {
+        void this.openFirstPopup();
+      },
+    });
   }
 
   onunload() {
     // 可逆性：卸载我们加载的扩展，避免污染 Web Viewer Session
+    if (this.popupHost) {
+      this.popupHost.onunload();
+    }
     if (this.manager) {
       void this.manager.unloadAll();
       this.log.info("onunload：已请求卸载全部托管扩展。");
@@ -229,6 +264,77 @@ export default class WebExtensionBridgePlugin extends Plugin {
       new Notice("Web Extension Bridge：卸载失败，详见控制台日志。");
     }
     return ok;
+  }
+
+  /** 打开第一个已加载的 POPUP_ACTION/MIXED 扩展的 popup（最小 POC 入口）。 */
+  async openFirstPopup(): Promise<void> {
+    const candidates = this.manager.list.filter(
+      (i) =>
+        i.lastLoadedId &&
+        (i.report?.executionMode === "POPUP_ACTION" || i.report?.executionMode === "MIXED")
+    );
+    const target = candidates[0];
+    if (!target) {
+      new Notice("Web Extension Bridge：未找到已加载且带 popup 的扩展。");
+      return;
+    }
+    await this.openPopupFor(target.folder);
+  }
+
+  /** 打开指定托管扩展的 popup（Popup Host 实验）。 */
+  async openPopupFor(folder: string): Promise<void> {
+    const item = this.manager.findByFolder(folder);
+    if (!item || !item.lastLoadedId) {
+      new Notice("Web Extension Bridge：扩展未加载，无法打开 Popup。");
+      return;
+    }
+    const popupPath = this.getPopupPath(item.folder);
+    if (!popupPath) {
+      new Notice("Web Extension Bridge：该扩展没有 default_popup。");
+      return;
+    }
+    const rep = await this.popupHost.open(item.lastLoadedId, popupPath, this.bridge.partition);
+    this.settings.lastPopupProbe = rep;
+    await this.saveData(this.settings);
+    if (rep.domReady && !rep.loadFailed) {
+      this.manager.patchItem(item.folder, { activationStatus: "POPUP_AVAILABLE" });
+    }
+    new Notice(
+      `Web Extension Bridge：Popup ${rep.popupAvailable ? "已打开" : "打开失败"}（${rep.url}）`,
+      8000
+    );
+  }
+
+  private getPopupPath(folder: string): string | null {
+    try {
+      const fs = require("fs");
+      const m = JSON.parse(fs.readFileSync(path.join(folder, "manifest.json"), "utf8"));
+      const p = m?.action?.default_popup ?? m?.browser_action?.default_popup;
+      return typeof p === "string" && p ? p : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 第 15 节轻量诊断：区分 "Bridge 失败" 与 "扩展自身功能失败"。
+   * 只聚合已有运行证据，不做代测、不发起翻译请求。
+   */
+  diagnoseInjection(): string[] {
+    const managed = this.manager.list;
+    const anyLoaded = managed.some((i) => i.enabled && !!i.lastLoadedId);
+    const poc = this.settings.lastPocResult;
+    const popup = this.settings.lastPopupProbe;
+    return [
+      `Extension load: ${anyLoaded ? "PASS" : "FAIL"}`,
+      `Content script detected: ${
+        poc ? (poc.markerFound ? "PASS" : "FAIL") : "N/A（需先运行 POC）"
+      }`,
+      `Extension UI detected: ${
+        popup ? (popup.popupAvailable ? "PASS" : "FAIL") : "N/A（需先打开 Popup）"
+      }`,
+      "Network translation: UNKNOWN（翻译 API 属扩展自身证据，Bridge 不做代测）",
+    ];
   }
 
   /** 单 URL POC：打开 URL → 等加载 → 检查 content script 是否生效。 */

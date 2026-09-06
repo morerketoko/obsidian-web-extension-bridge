@@ -48,6 +48,17 @@ Session）。`loadExtension` 是主进程 API，这里通过 remote 代理序列
 5. “重新加载” = 重新分析 + 卸载旧实例 + 重载；“移除” = 卸载并从列表删除。
 6. 命令面板提供“重载全部已启用扩展”，一键重载全部托管扩展。
 
+## Phase 2.5：执行模式与 Popup Host（实验）
+
+- 每个扩展除了评级（A/C/D/F），还会判定执行模式
+  （AUTO_INJECT / POPUP_ACTION / BACKGROUND_ONLY / DEVTOOLS / MIXED）与激活状态。
+- 注意区分「加载成功」与「可用」：`Load = PASS` 不等于 `Functional = PASS`。
+- 实验性 Popup Host（`open-popup-experiment` 命令）用同一 partition 承载
+  `chrome-extension://<id>/<popupPath>`，可对 popup 执行探针
+  （runtime / storage.local / tabs.query / PING_CONTENT）。
+- 设计说明：`docs/extension-execution-model.md`、`docs/popup-host-poc.md`、
+  `docs/phase2-5-machine-feedback.md`、`docs/popup-tab-context.md`。
+
 ## 日志
 
 统一前缀 `[WebExtensionBridge]`，级别 INFO/WARN/ERROR/DEBUG（设置页开启 DEBUG）。

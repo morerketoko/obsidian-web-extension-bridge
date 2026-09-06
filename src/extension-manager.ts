@@ -5,7 +5,20 @@ import * as path from "path";
 import { BridgeLogger } from "./logger";
 import { LoadResult, WebViewerSessionBridge } from "./session-bridge";
 import { confirmExtensionTrust } from "./trust";
-import { analyzeExtension, CompatibilityReport } from "./analyzer";
+import {
+  analyzeExtension,
+  CompatibilityReport,
+  ExtensionExecutionMode,
+} from "./analyzer";
+
+/** 当前宿主（Obsidian）中的激活状态。 */
+export type ActivationStatus =
+  | "READY"
+  | "LOADED_NO_UI_ENTRY"
+  | "POPUP_AVAILABLE"
+  | "AUTO_INJECT"
+  | "UNSUPPORTED"
+  | "UNKNOWN";
 
 export interface ManagedExtension {
   /** 唯一键：扩展目录的绝对路径。 */
@@ -20,6 +33,10 @@ export interface ManagedExtension {
   allowFileAccess: boolean;
   /** 最近一次静态兼容分析结果。 */
   report: CompatibilityReport | null;
+  /** 扩展主要执行模式（Phase 2.5，来自 analyzer；与 A/C/D/F 评级无关）。 */
+  executionMode: ExtensionExecutionMode;
+  /** 当前宿主中的激活状态：区分“加载成功”与“有可用触发入口”。 */
+  activationStatus: ActivationStatus;
   /** 最近一次成功加载后 Electron 返回的扩展 id。 */
   lastLoadedId: string | null;
   /** 最近一次加载失败原因。 */
@@ -62,6 +79,31 @@ function readManifestId(folder: string): string | null {
     return typeof m.id === "string" && m.id ? m.id : null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * 计算激活状态（Phase 2.5）：
+ * - 未启用/未加载 → UNKNOWN；
+ * - 评级 F（不支持）→ UNSUPPORTED；
+ * - AUTO_INJECT / MIXED（有主动 content script）→ AUTO_INJECT（页面会自动出现 UI）；
+ * - POPUP_ACTION → LOADED_NO_UI_ENTRY（加载成功但宿主尚无触发入口，
+ *   除非 Popup Host 已成功打开过 → POPUP_AVAILABLE）。
+ */
+function computeActivationStatus(item: ManagedExtension): ActivationStatus {
+  if (!item.enabled || !item.lastLoadedId) return "UNKNOWN";
+  if (item.report && !item.report.supported) return "UNSUPPORTED";
+  switch (item.report?.executionMode) {
+    case "AUTO_INJECT":
+    case "MIXED":
+      return "AUTO_INJECT";
+    case "POPUP_ACTION":
+      return "LOADED_NO_UI_ENTRY";
+    case "BACKGROUND_ONLY":
+    case "DEVTOOLS":
+    case "UNKNOWN":
+    default:
+      return "READY";
   }
 }
 
@@ -146,6 +188,8 @@ export class ExtensionManager {
       existing.version = report.version || existing.version;
       existing.manifestId = readManifestId(f) ?? existing.manifestId;
       existing.report = report;
+      existing.executionMode = report.executionMode;
+      existing.activationStatus = computeActivationStatus(existing);
       this.emitChanged();
       return { ok: true, alreadyManaged: true, item: { ...existing }, report };
     }
@@ -159,10 +203,13 @@ export class ExtensionManager {
       trusted: false,
       allowFileAccess: false,
       report,
+      executionMode: report.executionMode,
+      activationStatus: "UNKNOWN",
       lastLoadedId: null,
       lastLoadError: null,
       addedAt: new Date().toISOString(),
     };
+    item.activationStatus = computeActivationStatus(item);
     this.items.push(item);
     this.emitChanged();
     this.log.info("ExtensionManager 导入:", item.name, "@", item.version, "|", f);
@@ -206,12 +253,14 @@ export class ExtensionManager {
       item.enabled = true;
       item.lastLoadedId = res.extension.id;
       item.lastLoadError = null;
+      item.activationStatus = computeActivationStatus(item);
       this.loadedByFolder.set(item.folder, res.extension.id);
       this.log.info("ExtensionManager 已启用:", item.name, "|", res.extension.id);
     } else {
       item.enabled = false;
       item.lastLoadedId = null;
       item.lastLoadError = res.error ?? "loadExtension 失败（详见 warnings）";
+      item.activationStatus = computeActivationStatus(item);
       this.log.error("ExtensionManager 启用失败:", item.folder, res.error ?? "");
     }
     this.emitChanged();
