@@ -59,94 +59,104 @@ function errorMessage(err: unknown): string {
 
 // ---------- 探针脚本（executeJavaScript 在 popup 页面执行） ----------
 
-/** chrome.runtime / 全局 API 可用性。 */
-const PROBE_RUNTIME = `(() => {
-  let chromeApi = false;
-  try { chromeApi = typeof chrome !== "undefined" && !!chrome.runtime; } catch (e) {}
-  let id = null, name = null, platformOs = null;
-  try { id = chrome.runtime.id ?? null; } catch (e) {}
-  try { name = chrome.runtime.getManifest ? (chrome.runtime.getManifest().name ?? null) : null; } catch (e) {}
-  try { platformOs = chrome.runtime.getPlatformInfo ? null : null; } catch (e) {}
-  return JSON.stringify({ runtimeOk: chromeApi, id, manifestName: name });
+/** 读取探针暂存对象（同步求值，非 Promise，规避 executeJavaScript 失败）。 */
+const READ_PROBE_OUT = `JSON.stringify(window.__obWebProbeOut || {})`;
+
+/**
+ * 生成「同步调度 + 暂存结果」探针脚本：
+ * 调度阶段只做同步求值（立即返回 SCHEDULED），异步回调把结果写入
+ * window.__obWebProbeOut[slot]，probe() 再轮询读回。
+ * 规避 Electron webview.executeJavaScript 对返回 Promise 的脚本报
+ * "Script failed to execute, this normally means an error was thrown"。
+ */
+function buildProbeScript(key: string, apiCall: string): string {
+  return `(() => {
+  try {
+    const out = (window.__obWebProbeOut = window.__obWebProbeOut || {});
+    const slot = "__obProbe_" + ${JSON.stringify(key)};
+    const finish = (v) => {
+      clearTimeout(timer);
+      try { out[slot] = JSON.stringify(v); } catch (e) { out[slot] = JSON.stringify({ status: "SERIALIZE", error: String(e) }); }
+    };
+    const timer = setTimeout(() => finish({ status: "TIMEOUT" }), 5000);
+    try {
+      ${apiCall}
+    } catch (e) {
+      finish({ status: "THROW", error: String(e) });
+    }
+    return "SCHEDULED";
+  } catch (e) {
+    return "ENV:" + String(e);
+  }
 })()`;
+}
+
+/** chrome.runtime / 全局 API 可用性。 */
+const PROBE_RUNTIME = buildProbeScript("runtime", `
+    finish({
+      runtimeOk: typeof chrome !== "undefined" && !!chrome.runtime,
+      id: (() => { try { return chrome.runtime.id ?? null; } catch (e) { return null; } })(),
+      manifestName: (() => {
+        try {
+          return chrome.runtime && chrome.runtime.getManifest
+            ? (chrome.runtime.getManifest().name ?? null)
+            : null;
+        } catch (e) { return null; }
+      })(),
+    });`);
 
 /** chrome.storage.local 异步读写。 */
-const PROBE_STORAGE = `new Promise((resolve) => {
-  try {
+const PROBE_STORAGE = buildProbeScript("storage.local", `
     chrome.storage.local.get(null, (data) => {
-      if (chrome.runtime.lastError) {
-        resolve(JSON.stringify({ ok: false, error: chrome.runtime.lastError.message }));
-      } else {
-        const keys = Object.keys(data || {}).slice(0, 20);
-        resolve(JSON.stringify({ ok: true, keyCount: Object.keys(data || {}).length, keys }));
-      }
-    });
-    setTimeout(() => resolve(JSON.stringify({ ok: false, error: "TIMEOUT" })), 5000);
-  } catch (e) {
-    resolve(JSON.stringify({ ok: false, error: String(e) }));
-  }
-})()`;
+      try {
+        if (chrome.runtime.lastError) {
+          finish({ status: "ERROR", ok: false, error: chrome.runtime.lastError.message });
+        } else {
+          finish({ status: "RESPONSE", ok: true, keyCount: Object.keys(data || {}).length, keys: Object.keys(data || {}).slice(0, 20) });
+        }
+      } catch (e) { finish({ status: "CB_THROW", error: String(e) }); }
+    });`);
 
 /** chrome.tabs.query({active:true,currentWindow:true}) 语义探测。 */
-const PROBE_TABS = `new Promise((resolve) => {
-  try {
+const PROBE_TABS = buildProbeScript("tabs.query", `
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      if (chrome.runtime.lastError) {
-        resolve(JSON.stringify({ ok: false, error: chrome.runtime.lastError.message }));
-      } else {
-        const arr = tabs || [];
-        const first = arr[0] || null;
-        resolve(JSON.stringify({
-          ok: true,
-          count: arr.length,
-          first: first
-            ? { active: first.active, url: first.url ?? null, title: first.title ?? null }
-            : null,
-        }));
-      }
-    });
-    setTimeout(() => resolve(JSON.stringify({ ok: false, error: "TIMEOUT" })), 5000);
-  } catch (e) {
-    resolve(JSON.stringify({ ok: false, error: String(e) }));
-  }
-})()`;
+      try {
+        if (chrome.runtime.lastError) {
+          finish({ status: "ERROR", ok: false, error: chrome.runtime.lastError.message });
+        } else {
+          const arr = tabs || [];
+          const first = arr[0] || null;
+          finish({
+            status: "RESPONSE", ok: true, count: arr.length,
+            first: first ? { active: first.active, url: first.url ?? null, title: first.title ?? null } : null,
+          });
+        }
+      } catch (e) { finish({ status: "CB_THROW", error: String(e) }); }
+    });`);
 
 /** 消息链：从 popup 向 content script 发送 PING_CONTENT。 */
-const PROBE_PING = `new Promise((resolve) => {
-  const timer = setTimeout(() => resolve(JSON.stringify({ status: "TIMEOUT" })), 6000);
-  try {
+const PROBE_PING = buildProbeScript("PING_CONTENT", `
     chrome.runtime.sendMessage({ action: "PING_CONTENT" }, (resp) => {
-      clearTimeout(timer);
-      if (chrome.runtime.lastError) {
-        resolve(JSON.stringify({ status: "ERROR", error: chrome.runtime.lastError.message }));
-      } else {
-        resolve(JSON.stringify({ status: "RESPONSE", response: resp ?? null }));
-      }
-    });
-  } catch (e) {
-    clearTimeout(timer);
-    resolve(JSON.stringify({ status: "THROW", error: String(e) }));
-  }
-})()`;
+      try {
+        if (chrome.runtime.lastError) {
+          finish({ status: "ERROR", error: chrome.runtime.lastError.message });
+        } else {
+          finish({ status: "RESPONSE", response: resp ?? null });
+        }
+      } catch (e) { finish({ status: "CB_THROW", error: String(e) }); }
+    });`);
 
 /** 消息链：使用扩展自身协议 getSelectedText（gpt-3.5-translator 支持）。 */
-const PROBE_GET_SELECTED = `new Promise((resolve) => {
-  const timer = setTimeout(() => resolve(JSON.stringify({ status: "TIMEOUT" })), 6000);
-  try {
+const PROBE_GET_SELECTED = buildProbeScript("getSelectedText", `
     chrome.runtime.sendMessage({ action: "getSelectedText" }, (resp) => {
-      clearTimeout(timer);
-      if (chrome.runtime.lastError) {
-        resolve(JSON.stringify({ status: "ERROR", error: chrome.runtime.lastError.message }));
-      } else {
-        resolve(JSON.stringify({ status: "RESPONSE", response: resp ?? null }));
-      }
-    });
-  } catch (e) {
-    clearTimeout(timer);
-    resolve(JSON.stringify({ status: "THROW", error: String(e) }));
-  }
-})()`;
-
+      try {
+        if (chrome.runtime.lastError) {
+          finish({ status: "ERROR", error: chrome.runtime.lastError.message });
+        } else {
+          finish({ status: "RESPONSE", response: resp ?? null });
+        }
+      } catch (e) { finish({ status: "CB_THROW", error: String(e) }); }
+    });`);
 /**
  * 最小 Popup Host：创建/关闭 PopupHostView，收集探针报告。
  * 不注入兼容 shim、不修改第三方扩展源码、不提供完整工具栏。
@@ -401,27 +411,45 @@ class PopupHostView extends ItemView {
       this.appendResult(name + " => 不可用（webview.executeJavaScript 缺失）");
       return;
     }
+    // 阶段 1：同步调度（立即返回 SCHEDULED / ENV:... / THREW:...）
+    let step1 = "";
     try {
-      const r = await Promise.race([
-        Promise.resolve(wv.executeJavaScript(code)),
-        new Promise((_, rej) => setTimeout(() => rej(new Error("executeJavaScript TIMEOUT")), 8000)),
-      ]);
-      const text = typeof r === "string" ? r : JSON.stringify(r ?? null);
-     this.report.probes[name] = text;
-     this.report.lastProbeAt = new Date().toISOString();
-     this.appendResult(name + " => " + text);
-      this.emitReport();
-     this.extLog.info("Popup Host probe", name, text);
+      step1 = String((await Promise.resolve(wv.executeJavaScript(code))) ?? "");
     } catch (e) {
-      const text = "探针异常: " + errorMessage(e);
-     this.report.probes[name] = text;
-     this.report.lastProbeAt = new Date().toISOString();
-     this.appendResult(name + " => " + text);
-      this.emitReport();
-     this.extLog.error("Popup Host probe 失败", name, errorMessage(e));
+      step1 = "THREW:" + errorMessage(e);
+    }
+    // 阶段 2：轮询读取暂存结果（最多 8s，间隔 300ms）
+    const slot = "__obProbe_" + name;
+    let picked: string | null = null;
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline) {
+      try {
+        const raw = String((await Promise.resolve(wv.executeJavaScript(READ_PROBE_OUT))) ?? "");
+        const obj = JSON.parse(raw || "{}") as Record<string, unknown>;
+        if (typeof obj[slot] === "string") {
+          picked = obj[slot];
+          break;
+        }
+      } catch {
+        // 读取失败：继续轮询
+      }
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    const text =
+      picked ??
+      (step1.startsWith("SCHEDULED")
+        ? JSON.stringify({ status: "NO_RESULT", detail: "已调度但 8s 内未取到回调结果" })
+        : step1);
+    this.report.probes[name] = text;
+    this.report.lastProbeAt = new Date().toISOString();
+    this.appendResult(name + " => " + text);
+    this.emitReport();
+    if (step1.startsWith("ENV") || step1.startsWith("THREW") || picked) {
+      this.extLog.info("Popup Host probe", name, text);
+    } else {
+      this.extLog.warn("Popup Host probe 未取到结果", name, text);
     }
   }
-
   private async runAllProbes() {
     await this.probe("runtime", PROBE_RUNTIME);
     await this.probe("storage.local", PROBE_STORAGE);

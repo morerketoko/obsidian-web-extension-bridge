@@ -50,18 +50,18 @@ Injection = PASS（POC markerFound=true，标题 [EXT-TEST] 前缀）
 
 ```text
 Load = PASS（POPUP_ACTION；lastLoadedId=ennnoopnplmodedaafeaogfkjknjijdd，无加载错误）
-    Layout/评级 = C（uses runtime/scripting/storage/tabs；storage.sync 警告：不跨设备同步）
-    Popup Host = PARTIAL（activationStatus 已标 POPUP_AVAILABLE，但 lastPopupProbe 被 MouseTooltip 覆盖，需单独重测）
-Popup JS = PENDING
-runtime = PENDING
-storage.local = PENDING
-tabs.query = PENDING
-Popup → Content = PENDING
+Layout/评级 = C（uses runtime/scripting/storage/tabs；storage.sync 警告：不跨设备同步）
+Popup Host = PASS（真机 07:47Z：popup 打开成功，popupAvailable=true）
+Popup JS = PARTIAL（popup.js 崩溃：storage.sync 不可用 → apiKey 读取失败；Uncaught TypeError×4）
+runtime = PASS（真机：{"runtimeOk":true,"id":"ennnoopnplmodedaafeaogfkjknjijdd","manifestName":"GPT-3.5 Translator"}）
+storage.local = 首轮 FAIL（Script failed to execute，探针 Promise 求值问题，已改同步调度+轮询读回，待重测）
+tabs.query = 首轮 FAIL（同上；popup.js 自身亦报 tabs 主机权限受限）
+Popup → Content = 首轮 FAIL（同上 PING_CONTENT，待重测）
 ```
 
-关键认知：`popup.js` 触发翻译，`content.js` 仅监听 onMessage —— 加载成功 ≠ 页面有行为，
-必须用 Popup 才能启动。
-
+关键认知（第 15 节）：`Extension load = PASS` 不等于 `Functional = PASS`。
+GPT-3.5 实测：加载 OK、runtime OK，但 popup.js 因 Electron 不支持 storage.sync 而崩溃，
+翻译功能需扩展侧适配后才有望可用。
 ### MouseTooltipTranslator（真机进展 2026-09-06T07:38Z）
 
 ```text
@@ -87,13 +87,9 @@ Current Functional Coverage:
 
 ## 待回填检查表
 
-- [ ] Popup Host 视图创建成功（命令「实验：打开当前扩展 Popup」）
 - [x] Popup Host 视图创建成功（真机 2026-09-06T07:38Z）
-- [ ] 重测 PROBE_RUNTIME / PROBE_STORAGE / PROBE_TABS（修复回写后）
+- [ ] 重测 PROBE_RUNTIME / PROBE_STORAGE / PROBE_TABS（探针已重构为同步调度+轮询读回）
 - [ ] 重测 PING_CONTENT（popup → content）
-更详细的首次真机记录与探针回写缺陷说明见上方章节（首轮 probes:{} 为回写缺陷，已修复）。
-- [ ] PROBE_RUNTIME / PROBE_STORAGE / PROBE_TABS 三项结果
-- [ ] PING_CONTENT 结果（popup → content）
-- [ ] GPT-3.5 popup 内实际触发一次翻译请求
-- [ ] MouseTooltipTranslator：Load / hover tooltip / selection translation
-- [ ] 回填 docs/popup-host-poc.md 的 PENDING 项
+- [ ] GPT-3.5 popup 内实际触发一次翻译请求（popup.js 需先适配 storage.sync 不可用）
+- [ ] MouseTooltipTranslator：content injection / hover tooltip / selection translation
+- [ ] 回填 docs/popup-host-poc.md 的 PENDING*/首轮 FAIL 项

@@ -35,13 +35,15 @@
 | --- | --- | --- |
 | Popup Host 可创建视图 | PASS | 真机 2026-09-06T07:38Z（命令「实验：打开当前扩展 Popup」） |
 | chrome-extension:// 可加载 | PASS | MouseTooltip popup：domReady=true，loadFailed=false，popupAvailable=true |
-| popup JS 执行 | PENDING* | 探针结果未持久化缺陷已修复，需重测回填 |
-| chrome.runtime | PENDING* | 同上（PROBE_RUNTIME） |
-| chrome.storage.local | PENDING* | 同上（PROBE_STORAGE） |
-| chrome.tabs.query | PENDING* | 同上（PROBE_TABS） |
+| popup JS 执行 | PARTIAL* | 真机 07:47Z：GPT-3.5 popup.js 崩溃（`sync` 不可用致 apiKey 读取失败 + Uncaught TypeError×4） |
+| chrome.runtime | PASS | 真机 07:47Z：`{"runtimeOk":true,"id":"ennnoopnplmodedaafeaogfkjknjijdd","manifestName":"GPT-3.5 Translator"}` |
+| chrome.storage.local | PENDING* | 首轮失败：`GUEST_VIEW_MANAGER_CALL: Script failed to execute`（executeJavaScript 对返回 Promise 的脚本），已改同步调度+轮询读回，待重测 |
+| chrome.tabs.query | PENDING* | 同上；且 popup.js 自身报 tabs 权限受限（manifest 仅 api.openai.com 主机权限） |
 | popup → content_script message | PENDING* | 同上（PING_CONTENT） |
-| GPT-3.5 Translator 功能状态 | PENDING* | 需重测 + 真实翻译请求 |
+| GPT-3.5 Translator 功能状态 | PARTIAL* | runtime PASS；popup.js 崩溃需扩展侧修复（storage.sync 在 Electron 不可用）；真实翻译待重测 |
 
+* 注 1：首轮 `probes:{}` 为空是回写缺陷（已修复：PopupHost 报告回调即时写回 data.json）。
+* 注 2：二轮（07:47Z）runtime 已 PASS；storage/tabs/PING/getSelectedText 的 `Script failed to execute` 已定位为探针返回 Promise 的求值问题，已重构为同步调度 + `window.__obWebProbeOut` 暂存 + 轮询读回。
 * 注：首轮真机 `probes:{}` 为空是回写缺陷（探针只更新视图内存，未同步 data.json）。
 已修复（PopupHost 增加报告回调，探针/加载事件后即时回写 `lastPopupProbe`），
 重新加载插件后重测即可回填。
