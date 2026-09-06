@@ -43,14 +43,17 @@ session 持久性、扩展路径、扩展 id、加载结果、warnings、失败�
 ## 兼容性说明
 
 - 目标：Obsidian 1.13.7 / Electron 43.x（已在环境中确认运行版本 1.13.7）。
+- **POC 状态：PASS**（2026-09-06 真机验证：四站点注入、`<webview>.partition`
+  MATCH、同一 Session 上列出 Media Extended 与 test-extension，详见
+  `docs/runtime-validation.md`）。
 - 显示 “Electron Extension Compatibility”，**不承诺** 100% Chrome 扩展兼容。
 - 只支持 unpacked 扩展；不支持 CRX / Chrome Web Store / identity / sidePanel。
 - 不修改 Obsidian `app.asar`、不修改官方安装文件、不修改 Media Extended。
 - 所有内部 API 均有 feature detect，不兼容时安全退出并提示
   “Web Extension Bridge is not compatible with this Obsidian/Electron version.”。
-- “Extension Session === Web Viewer Session” 是设计推论（由相同 partition
-  推导），不是已证明事实；在 `docs/runtime-validation.md` 回填真机证据之前
-  不当作结论。
+- “Extension Session === Web Viewer Session” 已在被测环境由真机运行时证据
+  成立（详见 `docs/runtime-validation.md`），但仍限定版本：Obsidian/Electron
+  升级后需重跑验证再确认。
 
 ## 授权
 

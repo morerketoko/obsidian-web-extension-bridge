@@ -1,10 +1,9 @@
 # POC Session 报告 — Obsidian Web Extension Bridge
 
-> 状态：**代码与侦察完成；已装入 vault，等待 Obsidian 重载后真机验证回填**。
-> 重载 Obsidian（Ctrl+R 或重启）后，插件会自动恢复 test-extension 并可按
-> `autoRunValidation` 跑完整验证（状态机 + 四站点），结果写进 data.json 的
-> `lastValidationRun`，无需开 DevTools 即可回读。回填模板见
-> `docs/runtime-validation.md`（只填真实结果）。
+> 状态：**POC PASS（2026-09-06 真机验证）**。完整运行时证据（环境 / Session /
+> Extension / 四站点 / 重启恢复 / 结论）见 `docs/runtime-validation.md`。
+> 结果来自 Obsidian 自动运行写回的 data.json（`lastValidationRun`），
+> 无需开 DevTools 即可回读。
 
 ## 1. 摘要
 
@@ -124,33 +123,32 @@ App.getWebviewPartition()
 - `persist:vault-<appId>` 是 vault 级会话，会与 Obsidian 自带 hook 共存，
   但互不干扰扩展注入。
 
-## 8. 真机验证记录（待回填）
+## 8. 真机验证记录（已回填，2026-09-06）
 
-以下字段在插件装入 vault 并启用后，由
-`[WebExtensionBridge] LOAD_RESULT`/POC 日志回填：
-
-> 完整的真机验证模板（环境 / Session / Extension / POC / 生命周期 / 重启恢复 /
-> 结论）见 `docs/runtime-validation.md`。本文件只汇总；等真机结果出来后，
-> 两处文档一起回填，不写推测。
+完整记录见 `docs/runtime-validation.md`（只写真实结果）。本文件为汇总：
 
 ```text
-Obsidian version:        (待回填)
-Electron version:        (待回填)
-web viewer availability: (待回填)
-partition name:          (待回填)
-session persistence:     (待回填)
-extension path:          (待回填)
-extension id:            (待回填)
-extension load result:   (待回填)
-extension warnings:      (待回填)
-failure reason:          (待回填)
+Obsidian version:        1.13.7
+Electron version:        43.x（控制台 LOAD_RESULT 日志）
+web viewer availability: available
+partition name:          persist:vault-6940bf99bf765a13
+session persistence:     persistent
+storage path:            C:\Users\DIY\AppData\Roaming\obsidian\Partitions\vault-6940bf99bf765a13
+extension path:          E:\ob仓库\.obsidian\plugins\obsidian-web-extension-bridge\test-extension
+extension id:            ldijlodomnneibinbnmodkfggmbgopol
+extension load result:   OK
+extension warnings:      （无）
+failure reason:          （无）
+webview partition 对比:  MATCH（四站点）
+getAllExtensions:        Media Extended（%TEMP%\mx-extension-…）+ test-extension（同一 Session）
+生命周期事件订阅:        成功（ok:true）
 ```
 
 ### POC 验证清单
 
-- [ ] example.com：`data-obsidian-extension-test="true"`
-- [ ] example.com：title 前缀 `[EXT-TEST] `
-- [ ] https://www.youtube.com
-- [ ] https://www.bilibili.com
-- [ ] https://www.google.com
-- [ ] 普通 https 页面
+- [x] example.com：`data-obsidian-extension-test="true"`
+- [x] example.com：title 前缀 `[EXT-TEST] `
+- [x] https://www.youtube.com
+- [x] https://www.bilibili.com
+- [x] https://www.google.com（地区重定向至 google.com.hk，已兼容）
+- [x] 普通 https 页面
